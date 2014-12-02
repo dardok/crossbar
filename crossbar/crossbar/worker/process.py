@@ -20,6 +20,7 @@ from __future__ import absolute_import
 
 __all__ = ['run']
 
+from twisted.plugins import twisted_reactors
 
 def run():
    """
@@ -40,7 +41,7 @@ def run():
 
    parser.add_argument('--reactor',
                        default = None,
-                       choices = ['select', 'poll', 'epoll', 'kqueue', 'iocp'],
+                       choices = [reactor for reactor in dir(twisted_reactors) if isinstance(twisted_reactors.__getattribute__(reactor), twisted_reactors.Reactor)],
                        help = 'Explicit Twisted reactor selection (optional).')
 
    parser.add_argument('-c',

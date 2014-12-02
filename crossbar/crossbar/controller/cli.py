@@ -35,7 +35,7 @@ from twisted.internet.defer import inlineCallbacks
 
 from autobahn.twisted.choosereactor import install_reactor
 
-
+from twisted.plugins import twisted_reactors
 
 
 def run_command_version(options):
@@ -289,7 +289,7 @@ def run():
 
    parser.add_argument('--reactor',
                        default = None,
-                       choices = ['select', 'poll', 'epoll', 'kqueue', 'iocp'],
+                       choices = [reactor for reactor in dir(twisted_reactors) if isinstance(twisted_reactors.__getattribute__(reactor), twisted_reactors.Reactor)],
                        help = 'Explicit Twisted reactor selection')
 
    ## create subcommand parser
