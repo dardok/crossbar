@@ -21,7 +21,8 @@ from __future__ import absolute_import
 __all__ = (
    'PendingAuth',
    'PendingAuthPersona',
-   'PendingAuthWampCra'
+   'PendingAuthWampCra',
+   'PendingAuthTicket'
 )
 
 
@@ -90,3 +91,29 @@ class PendingAuthWampCra(PendingAuth):
 
       self.challenge = json.dumps(challenge_obj)
       self.signature = auth.compute_wcs(secret, self.challenge)
+
+
+
+class PendingAuthTicket(PendingAuth):
+   """
+   Pending Ticket-based authentication.
+   """
+
+   def __init__(self, realm, authid, authrole, authprovider, ticket):
+      """
+      :param authid: The authentication ID of the authenticating principal.
+      :type authid: unicode
+      :param authrole: The role under which the principal will be authenticated when
+         the authentication succeeds.
+      :type authrole: unicode
+      :param authprovider: Optional authentication provider (URI of procedure to call).
+      :type authprovider: unicode or None
+      :param ticket: The secret/ticket the authenticating principal will need to provide (or `None` when using dynamic authenticator).
+      :type ticket: bytes or None
+      """
+      self.authmethod = u"ticket"
+      self.realm = realm
+      self.authid = authid
+      self.authrole = authrole
+      self.authprovider = authprovider
+      self.ticket = ticket

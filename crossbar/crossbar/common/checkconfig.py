@@ -87,6 +87,36 @@ def check_or_raise_uri(value, message):
 
 
 
+def check_transport_auth_ticket(config):
+   """
+   Check a Ticket-based authentication configuration item.
+   """
+   if 'type' not in config:
+      raise Exception("missing mandatory attribute 'type' in Ticket-based authentication configuration")
+
+   if config['type'] not in ['static', 'dynamic']:
+      raise Exception("invalid type '{}' for Ticket-based authentication type - must be one of 'static', 'dynamic'".format(config['type']))
+
+   if config['type'] == 'static':
+      if 'principals' not in config:
+         raise Exception("missing mandatory attribute 'principals' in static Ticket-based authentication configuration")
+      if type(config['principals']) != dict:
+         raise Exception("invalid type for attribute 'principals' in static Ticket-based authentication configuration - expected dict, got {}".format(type(config['users'])))
+      for u, principal in config['principals'].items():
+         check_dict_args({
+            'ticket': (True, [six.text_type]),
+            'role': (False, [six.text_type]),
+            }, principal, "Ticket-based authentication configuration - principal '{}' configuration".format(u))
+
+   elif config['type'] == 'dynamic':
+      if 'authenticator' not in config:
+         raise Exception("missing mandatory attribute 'authenticator' in dynamic Ticket-based authentication configuration")
+      check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in dynamic Ticket-based authentication configuration".format(config['authenticator']))
+   else:
+      raise Exception("logic error")
+
+
+
 def check_transport_auth_wampcra(config):
    """
    Check a WAMP-CRA configuration item.
@@ -99,9 +129,9 @@ def check_transport_auth_wampcra(config):
 
    if config['type'] == 'static':
       if 'users' not in config:
-         raise Exception("missing mandatory attribute 'users' in static WAMP-CRA config")
+         raise Exception("missing mandatory attribute 'users' in static WAMP-CRA configuration")
       if type(config['users']) != dict:
-         raise Exception("invalid type for attribute 'users' in static WAMP-CRA config - expected dict, got {}".format(type(config['users'])))
+         raise Exception("invalid type for attribute 'users' in static WAMP-CRA configuration - expected dict, got {}".format(type(config['users'])))
       for u, user in config['users'].items():
          check_dict_args({
             'secret': (True, [six.text_type]),
@@ -113,10 +143,20 @@ def check_transport_auth_wampcra(config):
 
    elif config['type'] == 'dynamic':
       if 'authenticator' not in config:
-         raise Exception("missing mandatory attribute 'authenticator' in dynamic WAMP-CRA config")
-      check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in realm permissions".format(config['authenticator']))
+         raise Exception("missing mandatory attribute 'authenticator' in dynamic WAMP-CRA configuration")
+      check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in dynamic WAMP-CRA configuration".format(config['authenticator']))
    else:
       raise Exception("logic error")
+
+
+
+def check_transport_auth_anonymous(config):
+   """
+   Check a WAMP-Anonymous configuration item.
+   """
+   check_dict_args({
+      'role': (False, [six.text_type]),
+      }, config, "WAMP-Anonymous configuration")
 
 
 
@@ -126,10 +166,14 @@ def check_transport_auth(auth):
    """
    if type(auth) != dict:
       raise Exception("invalid type {} for authentication configuration item (dict expected)".format(type(auth)))
-   CHECKS = {'wampcra': check_transport_auth_wampcra}
+   CHECKS = {
+      'anonymous': check_transport_auth_anonymous,
+      'ticket': check_transport_auth_ticket,
+      'wampcra': check_transport_auth_wampcra,
+   }
    for k in auth:
       if k not in CHECKS:
-         raise Exception("invalid authentication method key '{0}' - must be one of: wampcra".format(k))
+         raise Exception("invalid authentication method key '{0}' - must be one of {}".format(CHECKS.keys()))
       CHECKS[k](auth[k])
 
 
@@ -665,22 +709,42 @@ def check_web_path_service_schemadoc(config):
 
 
 
-def check_web_path_service(path, config):
+def check_web_path_service_path(config):
+   """
+   Check a "path" path service on Web transport.
+
+   :param config: The path service configuration.
+   :type config: dict
+   """
+   check_dict_args({
+      'type': (True, [six.text_type]),
+      'paths': (True, [dict]),
+   }, config, "Web transport 'path' path service")
+
+   ## check nested paths
+   ##
+   check_paths(config['paths'], nested=True)
+
+
+
+def check_web_path_service(path, config, nested):
    """
    Check a single path service on Web transport.
 
    :param config: The path service configuration.
    :type config: dict
+   :param nested: Whether this is a nested path.
+   :type nested: bool
    """
    if not 'type' in config:
       raise Exception("missing mandatory attribute 'type' in Web transport path service '{}' configuration\n\n{}".format(path, config))
 
    ptype = config['type']
-   if path == '/':
+   if path == '/' and not nested:
       if ptype not in ['static', 'wsgi', 'redirect', 'pusher']:
          raise Exception("invalid type '{}' for root-path service in Web transport path service '{}' configuration\n\n{}".format(ptype, path, config))
    else:
-      if ptype not in ['websocket', 'static', 'wsgi', 'redirect', 'json', 'cgi', 'longpoll', 'pusher', 'schemadoc']:
+      if ptype not in ['websocket', 'static', 'wsgi', 'redirect', 'json', 'cgi', 'longpoll', 'pusher', 'schemadoc', 'path']:
          raise Exception("invalid type '{}' for sub-path service in Web transport path service '{}' configuration\n\n{}".format(ptype, path, config))
 
    checkers = {
@@ -693,6 +757,7 @@ def check_web_path_service(path, config):
       'longpoll': check_web_path_service_longpoll,
       'pusher': check_web_path_service_pusher,
       'schemadoc': check_web_path_service_schemadoc,
+      'path': check_web_path_service_path,
    }
 
    checkers[ptype](config)
@@ -728,16 +793,7 @@ def check_listening_transport_web(transport):
    if not '/' in paths:
       raise Exception("missing mandatory path '/' in 'paths' in Web transport configuration")
 
-   pat = re.compile("^([a-z0-9A-Z]+|/)$")
-
-   for p in paths:
-      if type(p) != six.text_type:
-         raise Exception("keys in 'paths' in Web transport configuration must be strings ({} encountered)".format(type(p)))
-
-      if not pat.match(p):
-         raise Exception("invalid value '{}' for path in Web transport configuration".format(p))
-
-      check_web_path_service(p, paths[p])
+   check_paths(paths)
 
    if 'options' in transport:
       options = transport['options']
@@ -770,6 +826,28 @@ def check_listening_transport_web(transport):
          hixie76_aware = options['hixie76_aware']
          if type(hixie76_aware) != bool:
             raise Exception("'hixie76_aware' attribute in 'options' in Web transport must be bool ({} encountered)".format(type(hixie76_aware)))
+
+
+
+def check_paths(paths, nested=False):
+   """
+   Checks all configured paths.
+
+   :param paths: Configured paths to check.
+   :type paths: dict
+   :param nested: Whether this is a nested path.
+   :type nested: bool
+   """
+   pat = re.compile("^([a-z0-9A-Z]+|/)$")
+
+   for p in paths:
+      if type(p) != six.text_type:
+         raise Exception("keys in 'paths' in Web transport configuration must be strings ({} encountered)".format(type(p)))
+
+      if not pat.match(p):
+         raise Exception("invalid value '{}' for path in Web transport configuration".format(p))
+
+      check_web_path_service(p, paths[p], nested)
 
 
 
