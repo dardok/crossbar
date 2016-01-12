@@ -45,6 +45,8 @@ from twisted.python.reflect import qual
 
 from autobahn.twisted.choosereactor import install_reactor
 
+from twisted.plugins import twisted_reactors
+
 import crossbar
 from crossbar._logging import make_logger
 
@@ -682,7 +684,7 @@ def run(prog=None, args=None, reactor=None):
     #
     parser.add_argument('--reactor',
                         default=None,
-                        choices=['select', 'poll', 'epoll', 'kqueue', 'iocp'],
+                        choices=[reactor for reactor in dir(twisted_reactors) if isinstance(twisted_reactors.__getattribute__(reactor), twisted_reactors.Reactor)],
                         help='Explicit Twisted reactor selection')
 
     # create subcommand parser
