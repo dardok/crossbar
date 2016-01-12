@@ -896,7 +896,7 @@ def run(prog=None, args=None, reactor=None):
 
         # we use an Autobahn utility to import the "best" available Twisted
         # reactor
-        reactor = install_reactor(options.reactor + 'reactor', debug)
+        reactor = install_reactor(options.reactor)
 
     # Start the logger
     _startlog(options, reactor)
