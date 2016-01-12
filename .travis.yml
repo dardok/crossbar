@@ -1,0 +1,54 @@
+language: python
+sudo: false
+
+install:
+  - pip install tox codecov
+
+env:
+  - TOX_ENV=flake8
+
+  - TOX_ENV=py27-twtrunk-abtrunk
+  - TOX_ENV=py27-twcurrent-abtrunk
+  #- TOX_ENV=py27-twcurrent-abcurrent
+
+  - TOX_ENV=py33-twtrunk-abtrunk
+  - TOX_ENV=py33-twcurrent-abtrunk
+  #- TOX_ENV=py33-twcurrent-abcurrent
+
+  - TOX_ENV=py34-twtrunk-abtrunk
+  - TOX_ENV=py34-twcurrent-abtrunk
+  #- TOX_ENV=py34-twcurrent-abcurrent
+
+  - TOX_ENV=pypy-twtrunk-abtrunk
+  - TOX_ENV=pypy-twcurrent-abtrunk
+  #- TOX_ENV=pypy-twcurrent-abcurrent
+
+script:
+  - tox -c tox.ini -e $TOX_ENV
+
+after_success:
+  - codecov
+
+notifications:
+   irc:
+      channels:
+         - "irc.freenode.org#crossbar"
+      use_notice: true
+      skip_join: true
+
+matrix:
+  fast_finish: true
+
+  # https://github.com/travis-ci/travis-ci/issues/4794#issuecomment-143758799
+  include:
+    - python: 3.5
+      env:
+      - TOX_ENV=py35-twtrunk-abtrunk
+
+    - python: 3.5
+      env:
+      - TOX_ENV=py35-twcurrent-abtrunk
+
+#    - python: 3.5
+#      env:
+#      - TOX_ENV=py35-twcurrent-abcurrent
