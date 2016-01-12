@@ -620,7 +620,7 @@ class RouterSession(BaseSession):
                             continue
 
                         # authmethod not available
-                        if authmethod not in AUTHMETHOD_MAP:
+                        if authmethod != u'anonymous' and authmethod not in AUTHMETHOD_MAP:
                             self.log.debug("client requested valid, but unavailable authentication method {authmethod}", authmethod=authmethod)
                             continue
 
