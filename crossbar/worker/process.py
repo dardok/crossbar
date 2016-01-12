@@ -34,8 +34,6 @@ import six
 
 from twisted.internet.error import ReactorNotRunning
 
-from twisted.plugins import twisted_reactors
-
 __all__ = ('run',)
 
 
@@ -69,7 +67,7 @@ def run():
 
     parser.add_argument('--reactor',
                         default=None,
-                        choices=[reactor for reactor in dir(twisted_reactors) if isinstance(twisted_reactors.__getattribute__(reactor), twisted_reactors.Reactor)],
+                        choices=['select', 'poll', 'epoll', 'kqueue', 'iocp', 'gi', 'gtk3'],
                         help='Explicit Twisted reactor selection (optional).')
 
     parser.add_argument('--loglevel',
