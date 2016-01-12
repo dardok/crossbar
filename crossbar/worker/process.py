@@ -130,7 +130,7 @@ def run():
     # we use an Autobahn utility to import the "best" available Twisted reactor
     #
     from autobahn.twisted.choosereactor import install_reactor
-    reactor = install_reactor(options.reactor)
+    reactor = install_reactor(options.reactor + 'reactor')
 
     from twisted.python.reflect import qual
     log.info("Worker process starting ({python}-{reactor}) ..",
