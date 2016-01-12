@@ -896,7 +896,11 @@ def run(prog=None, args=None, reactor=None):
 
         # we use an Autobahn utility to import the "best" available Twisted
         # reactor
-        reactor = install_reactor(options.reactor)
+        if options.reactor:
+            from twisted.python.reflect import namedAny
+            reactor = namedAny('twisted.internet.' + options.reactor + 'reactor').install()
+        else:
+            reactor = install_reactor(options.reactor)
 
     # Start the logger
     _startlog(options, reactor)
