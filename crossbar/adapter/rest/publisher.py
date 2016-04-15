@@ -28,11 +28,9 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
+from __future__ import absolute_import, division
 
 import json
-
-from twisted.web import server
 
 from autobahn.wamp.types import PublishOptions
 
@@ -43,51 +41,15 @@ __all__ = ('PublisherResource',)
 
 class PublisherResource(_CommonResource):
     """
-    A HTTP/POST to WAMP PubSub bridge.
-
-    Config:
-
-       "transports": [
-          {
-             "type": "web",
-             "endpoint": {
-                "type": "tcp",
-                "port": 8080
-             },
-             "paths": {
-                "/": {
-                   "type": "static",
-                   "directory": ".."
-                },
-                "ws": {
-                   "type": "websocket"
-                },
-                "publish": {
-                   "type": "publisher",
-                   "realm": "realm1",
-                   "role": "anonymous",
-                   "options": {
-                      "key": "foobar",
-                      "secret": "secret",
-                      "post_body_limit": 8192,
-                      "timestamp_delta_limit": 10,
-                      "require_ip": ["192.168.1.1/255.255.255.0", "127.0.0.1"],
-                      "require_tls": false
-                   }
-                }
-             }
-          }
-       ]
-
-    Test publishing to a topic `com.myapp.topic1`:
-
-       curl -H "Content-Type: application/json" -d '{"topic": "com.myapp.topic1", "args": ["Hello, world"]}' http://127.0.0.1:8080/publish
+    A HTTP/POST to WAMP-Publisher bridge.
     """
 
     def _process(self, request, event):
 
         if 'topic' not in event:
-            return self._deny_request(request, 400, "invalid request event - missing 'topic' in HTTP/POST body")
+            return self._deny_request(request, 400,
+                                      key="topic",
+                                      log_category="AR455")
 
         topic = event.pop('topic')
 
@@ -107,21 +69,16 @@ class PublisherResource(_CommonResource):
 
         def on_publish_ok(pub):
             res = {'id': pub.id}
-            self.log.debug("request succeeded with result {res}", res=res)
-            body = json.dumps(res, separators=(',', ':'), ensure_ascii=False).encode('utf8')
-            request.setHeader(b'content-type', b'application/json; charset=UTF-8')
-            request.setHeader(b'cache-control', b'no-store, no-cache, must-revalidate, max-age=0')
-            request.setResponseCode(202)
-            request.write(body)
-            request.finish()
+            body = json.dumps(res, separators=(',', ':'),
+                              ensure_ascii=False).encode('utf8')
+            request.setHeader(b'content-type',
+                              b'application/json; charset=UTF-8')
+            request.setHeader(b'cache-control',
+                              b'no-store, no-cache, must-revalidate, max-age=0')
+            self._complete_request(request, 202, body, log_category="AR200")
 
         def on_publish_error(err):
-            emsg = "PublisherResource - request failed with error {0}\n".format(err.value)
-            self.log.debug(emsg)
-            request.setResponseCode(400)
-            request.write(emsg)
-            request.finish()
+            return self._fail_request(request, 400,
+                                      log_failure=err, log_category="AR456")
 
-        d.addCallbacks(on_publish_ok, on_publish_error)
-
-        return server.NOT_DONE_YET
+        return d.addCallbacks(on_publish_ok, on_publish_error)

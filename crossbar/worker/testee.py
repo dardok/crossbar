@@ -38,6 +38,8 @@ from autobahn.twisted.websocket import WebSocketServerFactory, \
 from autobahn.wamp.types import RegisterOptions
 from autobahn.wamp.exception import ApplicationError
 
+from txaio import make_logger
+
 import crossbar
 from crossbar.router.protocol import set_websocket_options
 from crossbar.worker.worker import NativeWorkerSession
@@ -63,6 +65,8 @@ class StreamTesteeServerFactory(protocol.Factory):
 
 class WebSocketTesteeServerProtocol(WebSocketServerProtocol):
 
+    log = make_logger()
+
     def onMessage(self, payload, isBinary):
         self.sendMessage(payload, isBinary)
 
@@ -78,37 +82,35 @@ class WebSocketTesteeServerProtocol(WebSocketServerProtocol):
                                       cbVersion=crossbar.__version__,
                                       wsUri=self.factory.url))
         except Exception as e:
-            print("Error rendering WebSocket status page template: {}".format(e))
+            self.log.warn("Error rendering WebSocket status page template: {}".format(e))
 
 
 class StreamingWebSocketTesteeServerProtocol(WebSocketServerProtocol):
 
     def onMessageBegin(self, isBinary):
-        # print "onMessageBegin"
         WebSocketServerProtocol.onMessageBegin(self, isBinary)
         self.beginMessage(isBinary=isBinary)
 
     def onMessageFrameBegin(self, length):
-        # print "onMessageFrameBegin"
         WebSocketServerProtocol.onMessageFrameBegin(self, length)
         self.beginMessageFrame(length)
 
     def onMessageFrameData(self, data):
-        # print "onMessageFrameData", len(data)
         self.sendMessageFrameData(data)
 
     def onMessageFrameEnd(self):
-        # print "onMessageFrameEnd"
         pass
 
     def onMessageEnd(self):
-        # print "onMessageEnd"
         self.endMessage()
 
 
 class WebSocketTesteeServerFactory(WebSocketServerFactory):
 
     protocol = WebSocketTesteeServerProtocol
+
+    # FIXME: we currently don't use the streaming variant of the testee server protocol,
+    # since it does not work together with WebSocket compression
     # protocol = StreamingWebSocketTesteeServerProtocol
 
     def __init__(self, config, templates):
@@ -124,8 +126,7 @@ class WebSocketTesteeServerFactory(WebSocketServerFactory):
         WebSocketServerFactory.__init__(self,
                                         url=config.get('url', None),
                                         server=server,
-                                        externalPort=externalPort,
-                                        debug=config.get('debug', False))
+                                        externalPort=externalPort)
 
         # transport configuration
         self._config = config

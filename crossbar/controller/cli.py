@@ -38,15 +38,15 @@ import pkg_resources
 import platform
 import signal
 import sys
-
 import six
+
+import crossbar
+
+from txaio import make_logger
 
 from twisted.python.reflect import qual
 
 from autobahn.twisted.choosereactor import install_reactor
-
-import crossbar
-from crossbar._logging import make_logger
 
 
 try:
@@ -195,10 +195,9 @@ def run_command_version(options, reactor=None, **kwargs):
     Subcommand "crossbar version".
     """
     log = make_logger()
-    verbose = False
+    # verbose = True
 
     # Python
-    #
     py_ver = '.'.join([str(x) for x in list(sys.version_info[:3])])
     py_ver_string = "[%s]" % sys.version.replace('\n', ' ')
 
@@ -208,18 +207,18 @@ def run_command_version(options, reactor=None, **kwargs):
         py_ver_detail = platform.python_implementation()
 
     # Twisted / Reactor
-    #
     tx_ver = "%s-%s" % (pkg_resources.require("Twisted")[0].version, reactor.__class__.__name__)
     tx_loc = "[%s]" % qual(reactor.__class__)
 
+    # txaio
+    txaio_ver = 'txaio-%s' % pkg_resources.require("txaio")[0].version
+
     # Autobahn
-    #
     from autobahn.websocket.protocol import WebSocketProtocol
     ab_ver = pkg_resources.require("autobahn")[0].version
     ab_loc = "[%s]" % qual(WebSocketProtocol)
 
     # UTF8 Validator
-    #
     from autobahn.websocket.utf8validator import Utf8Validator
     s = qual(Utf8Validator)
     if 'wsaccel' in s:
@@ -232,7 +231,6 @@ def run_command_version(options, reactor=None, **kwargs):
     utf8_loc = "[%s]" % qual(Utf8Validator)
 
     # XOR Masker
-    #
     from autobahn.websocket.xormasker import XorMaskerNull
     s = qual(XorMaskerNull)
     if 'wsaccel' in s:
@@ -245,7 +243,7 @@ def run_command_version(options, reactor=None, **kwargs):
     xor_loc = "[%s]" % qual(XorMaskerNull)
 
     # JSON Serializer
-    #
+    supported_serializers = ['JSON']
     from autobahn.wamp.serializer import JsonObjectSerializer
     s = str(JsonObjectSerializer.JSON_MODULE)
     if 'ujson' in s:
@@ -254,44 +252,53 @@ def run_command_version(options, reactor=None, **kwargs):
         json_ver = 'stdlib'
 
     # MsgPack Serializer
-    #
     try:
         import msgpack  # noqa
         msgpack_ver = 'msgpack-python-%s' % pkg_resources.require('msgpack-python')[0].version
+        supported_serializers.append('MessagePack')
     except ImportError:
         msgpack_ver = '-'
 
     # CBOR Serializer
-    #
     try:
         import cbor  # noqa
         cbor_ver = 'cbor-%s' % pkg_resources.require('cbor')[0].version
+        supported_serializers.append('CBOR')
     except ImportError:
         cbor_ver = '-'
+
+    # LMDB
+    try:
+        import lmdb  # noqa
+        lmdb_lib_ver = '.'.join([str(x) for x in lmdb.version()])
+        lmdb_ver = '{}/lmdb-{}'.format(pkg_resources.require('lmdb')[0].version, lmdb_lib_ver)
+    except ImportError:
+        lmdb_ver = '-'
 
     def decorate(text):
         return click.style(text, fg='yellow', bold=True)
 
     for line in BANNER.splitlines():
-        print(decorate("{:>40}".format(line)))
+        log.info(decorate("{:>40}".format(line)))
 
     pad = " " * 22
 
     log.info(" Crossbar.io        : {ver}", ver=decorate(crossbar.__version__))
-    log.info("   Autobahn         : {ver}", ver=decorate(ab_ver))
-    log.debug("{pad}{debuginfo}", pad=pad, debuginfo=decorate(ab_loc))
-    if verbose:
-        log.info("     UTF8 Validator : {ver}", ver=decorate(utf8_ver))
-        log.debug("{pad}{debuginfo}", pad=pad, debuginfo=decorate(utf8_loc))
-        log.info("     XOR Masker     : {ver}", ver=decorate(xor_ver))
-        log.debug("{pad}{debuginfo}", pad=pad, debuginfo=decorate(xor_loc))
-        log.info("     JSON Codec     : {ver}", ver=decorate(json_ver))
-        log.info("     MsgPack Codec  : {ver}", ver=decorate(msgpack_ver))
-        log.info("     CBOR Codec     : {ver}", ver=decorate(cbor_ver))
+    log.info("   Autobahn         : {ver} (with {serializers})", ver=decorate(ab_ver), serializers=', '.join(supported_serializers))
+    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(ab_loc))
+    log.debug("     txaio          : {ver}", ver=decorate(txaio_ver))
+    log.debug("     UTF8 Validator : {ver}", ver=decorate(utf8_ver))
+    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(utf8_loc))
+    log.debug("     XOR Masker     : {ver}", ver=decorate(xor_ver))
+    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(xor_loc))
+    log.debug("     JSON Codec     : {ver}", ver=decorate(json_ver))
+    log.debug("     MsgPack Codec  : {ver}", ver=decorate(msgpack_ver))
+    log.debug("     CBOR Codec     : {ver}", ver=decorate(cbor_ver))
     log.info("   Twisted          : {ver}", ver=decorate(tx_ver))
-    log.debug("{pad}{debuginfo}", pad=pad, debuginfo=decorate(tx_loc))
+    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(tx_loc))
+    log.info("   LMDB             : {ver}", ver=decorate(lmdb_ver))
     log.info("   Python           : {ver}/{impl}", ver=decorate(py_ver), impl=decorate(py_ver_detail))
-    log.debug("{pad}{debuginfo}", pad=pad, debuginfo=decorate(py_ver_string))
+    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(py_ver_string))
     log.info(" OS                 : {ver}", ver=decorate(platform.platform()))
     log.info(" Machine            : {ver}", ver=decorate(platform.machine()))
     log.info("")
@@ -414,11 +421,12 @@ def _startlog(options, reactor):
     """
     Start the logging in a way that all the subcommands can use it.
     """
-    from crossbar._logging import start_logging, set_global_log_level
-    from crossbar._logging import globalLogPublisher
+    from twisted.logger import globalLogPublisher
+    from txaio import start_logging, set_global_log_level
 
     loglevel = getattr(options, "loglevel", "info")
     logformat = getattr(options, "logformat", "none")
+    colour = getattr(options, "colour", "auto")
 
     set_global_log_level(loglevel)
 
@@ -446,6 +454,17 @@ def _startlog(options, reactor):
         # We want to log to stdout/stderr.
         from crossbar._logging import make_stdout_observer
         from crossbar._logging import make_stderr_observer
+        from crossbar._logging import LogLevel
+
+        if colour == "auto":
+            if sys.__stdout__.isatty():
+                colour = True
+            else:
+                colour = False
+        elif colour == "true":
+            colour = True
+        else:
+            colour = False
 
         if loglevel == "none":
             # Do no logging!
@@ -453,23 +472,33 @@ def _startlog(options, reactor):
         elif loglevel in ["error", "warn", "info"]:
             # Print info to stdout, warn+ to stderr
             observers.append(make_stdout_observer(show_source=False,
-                                                  format=logformat))
+                                                  format=logformat,
+                                                  colour=colour))
             observers.append(make_stderr_observer(show_source=False,
-                                                  format=logformat))
+                                                  format=logformat,
+                                                  colour=colour))
         elif loglevel == "debug":
             # Print debug+info to stdout, warn+ to stderr, with the class
             # source
             observers.append(make_stdout_observer(show_source=True,
-                                                  format=logformat))
+                                                  levels=(LogLevel.info,
+                                                          LogLevel.debug),
+                                                  format=logformat,
+                                                  colour=colour))
             observers.append(make_stderr_observer(show_source=True,
-                                                  format=logformat))
+                                                  format=logformat,
+                                                  colour=colour))
         elif loglevel == "trace":
             # Print trace+, with the class source
             observers.append(make_stdout_observer(show_source=True,
+                                                  levels=(LogLevel.info,
+                                                          LogLevel.debug),
                                                   format=logformat,
-                                                  trace=True))
+                                                  trace=True,
+                                                  colour=colour))
             observers.append(make_stderr_observer(show_source=True,
-                                                  format=logformat))
+                                                  format=logformat,
+                                                  colour=colour))
         else:
             assert False, "Shouldn't ever get here."
 
@@ -481,7 +510,7 @@ def _startlog(options, reactor):
                                       globalLogPublisher.removeObserver, observer)
 
     # Actually start the logger.
-    start_logging()
+    start_logging(None, loglevel)
 
 
 def run_command_start(options, reactor=None):
@@ -512,7 +541,7 @@ def run_command_start(options, reactor=None):
                 json.dumps(
                     pid_data,
                     sort_keys=False,
-                    indent=3,
+                    indent=4,
                     separators=(', ', ': '),
                     ensure_ascii=False
                 )
@@ -540,7 +569,8 @@ def run_command_start(options, reactor=None):
     # bannerFormat = "{:<18} {:<24}"
     bannerFormat = "    {} {}"
     log.info(bannerFormat.format("Crossbar.io Version:", click.style(crossbar.__version__, fg='yellow', bold=True)))
-    log.info(bannerFormat.format("Node Public Key:", click.style(pubkey, fg='yellow', bold=True)))
+    if pubkey:
+        log.info(bannerFormat.format("Node Public Key:", click.style(pubkey, fg='yellow', bold=True)))
     log.info()
 
     log.info("Running from node directory '{cbdir}'", cbdir=options.cbdir)
@@ -549,10 +579,6 @@ def run_command_start(options, reactor=None):
     log.info("Controller process starting ({python}-{reactor}) ..",
              python=platform.python_implementation(),
              reactor=qual(reactor.__class__).split('.')[-1])
-
-    # relative path validation won't work if we aren't in our
-    # working-dir when doing the validation
-    os.chdir(options.cbdir)
 
     from crossbar.controller.node import Node
     from crossbar.common.checkconfig import InvalidConfigException
@@ -622,24 +648,30 @@ def run_command_check(options, **kwargs):
     from crossbar.common.checkconfig import check_config_file, color_json
     configfile = os.path.join(options.cbdir, options.config)
 
-    print("\nChecking node configuration file '{}':\n".format(configfile))
+    verbose = False
 
-    color = color_json
-    with open(configfile, 'r') as f:
-        print(color(f.read().decode('utf8')))
-
-    old_dir = os.path.abspath(os.path.curdir)
-    os.chdir(options.cbdir)
     try:
-        check_config_file(configfile)
+        print("Checking local node configuration file: {}".format(configfile))
+        config = check_config_file(configfile)
     except Exception as e:
-        print("\nError: {}\n".format(e))
+        print("Error: {}".format(e))
         sys.exit(1)
     else:
-        print("Ok, node configuration looks good!\n")
+        print("Ok, node configuration looks good!")
+
+        if verbose:
+            import json
+            config_content = json.dumps(
+                config,
+                skipkeys=False,
+                sort_keys=False,
+                ensure_ascii=False,
+                separators=(',', ': '),
+                indent=4,
+            )
+            print(color_json(config_content))
+
         sys.exit(0)
-    finally:
-        os.chdir(old_dir)
 
 
 def run_command_convert(options, **kwargs):
@@ -660,17 +692,41 @@ def run_command_convert(options, **kwargs):
         sys.exit(0)
 
 
+def run_command_upgrade(options, **kwargs):
+    """
+    Subcommand "crossbar upgrade".
+    """
+    from crossbar.common.checkconfig import upgrade_config_file
+    configfile = os.path.join(options.cbdir, options.config)
+
+    print("Upgrading local configuration file {}".format(configfile))
+
+    try:
+        upgrade_config_file(configfile)
+    except Exception as e:
+        print("\nError: {}\n".format(e))
+        sys.exit(1)
+    else:
+        sys.exit(0)
+
+
 def run(prog=None, args=None, reactor=None):
     """
     Entry point of Crossbar.io CLI.
     """
-
     loglevel_args = {
         "type": str,
         "default": 'info',
         "choices": ['none', 'error', 'warn', 'info', 'debug', 'trace'],
         "help": ("How much Crossbar.io should log to the terminal, in order "
                  "of verbosity.")
+    }
+
+    colour_args = {
+        "type": str,
+        "default": "auto",
+        "choices": ["true", "false", "auto"],
+        "help": "If logging should be coloured."
     }
 
     # create the top-level parser
@@ -699,6 +755,8 @@ def run(prog=None, args=None, reactor=None):
 
     parser_version.add_argument('--loglevel',
                                 **loglevel_args)
+    parser_version.add_argument('--colour',
+                                **colour_args)
 
     parser_version.set_defaults(func=run_command_version)
 
@@ -760,11 +818,15 @@ def run(prog=None, args=None, reactor=None):
     parser_start.add_argument('--loglevel',
                               **loglevel_args)
 
+    parser_start.add_argument('--colour',
+                              **colour_args)
+
     parser_start.add_argument('--logformat',
                               type=six.text_type,
-                              default='colour',
-                              choices=['syslogd', 'nocolour', 'colour'],
-                              help="The format of the logs -- suitable for syslogd, not coloured, or coloured.")
+                              default='standard',
+                              choices=['syslogd', 'standard', 'none'],
+                              help=("The format of the logs -- suitable for "
+                                    "syslogd, not coloured, or coloured."))
 
     # "stop" command
     #
@@ -809,6 +871,8 @@ def run(prog=None, args=None, reactor=None):
 
     parser_check.add_argument('--loglevel',
                               **loglevel_args)
+    parser_check.add_argument('--colour',
+                              **colour_args)
     parser_check.set_defaults(func=run_command_check)
 
     parser_check.add_argument('--cbdir',
@@ -838,6 +902,23 @@ def run(prog=None, args=None, reactor=None):
                               default=None,
                               help="Crossbar.io configuration file (overrides default CBDIR/config.json)")
 
+    # "upgrade" command
+    #
+    parser_check = subparsers.add_parser('upgrade',
+                                         help='Upgrade a Crossbar.io node`s local configuration file to current configuration file format.')
+
+    parser_check.set_defaults(func=run_command_upgrade)
+
+    parser_check.add_argument('--cbdir',
+                              type=six.text_type,
+                              default=None,
+                              help="Crossbar.io node directory (overrides ${CROSSBAR_DIR} and the default ./.crossbar)")
+
+    parser_check.add_argument('--config',
+                              type=six.text_type,
+                              default=None,
+                              help="Crossbar.io configuration file (overrides default CBDIR/config.json)")
+
     # parse cmd line args
     #
     options = parser.parse_args(args)
@@ -845,6 +926,11 @@ def run(prog=None, args=None, reactor=None):
         options.argv = [prog] + args
     else:
         options.argv = sys.argv
+
+    # coloured logging does not work on Windows, so overwrite it!
+    #
+    if sys.platform == 'win32':
+        options.colour = False
 
     # Crossbar.io node directory
     #
@@ -857,6 +943,11 @@ def run(prog=None, args=None, reactor=None):
             else:
                 options.cbdir = '.'
         options.cbdir = os.path.abspath(options.cbdir)
+
+        # convenience: if --cbdir points to a config file, take
+        # the config file's base dirname as node directory
+        if os.path.isfile(options.cbdir):
+            options.cbdir = os.path.dirname(options.cbdir)
 
     # Crossbar.io node configuration file
     #

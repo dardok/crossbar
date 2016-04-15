@@ -35,9 +35,8 @@ from autobahn.twisted.websocket import WampWebSocketClientFactory, \
 
 from twisted.internet.error import ProcessDone, ProcessTerminated
 from twisted.internet.error import ConnectionDone
-# from twisted.internet.error import ConnectionClosed, ConnectionLost, ConnectionAborted
 
-from crossbar._logging import make_logger
+from txaio import make_logger
 
 
 __all__ = ('create_native_worker_client_factory',)
@@ -125,7 +124,7 @@ def create_native_worker_client_factory(router_session_factory, on_ready, on_exi
     :param router_session_factory: Router session factory to attach to.
     :type router_session_factory: obj
     """
-    factory = NativeWorkerClientFactory(router_session_factory, "ws://localhost", debug=False)
+    factory = NativeWorkerClientFactory(router_session_factory, u'ws://localhost')
 
     # we need to increase the opening handshake timeout in particular, since starting up a worker
     # on PyPy will take a little (due to JITting)

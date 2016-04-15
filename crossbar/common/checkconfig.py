@@ -34,26 +34,40 @@ import os
 import json
 import re
 import six
+import yaml
+
+from collections import OrderedDict, Hashable
 
 from pprint import pformat
 
 from pygments import highlight, lexers, formatters
 
-from autobahn.websocket.protocol import parseWsUrl
+from autobahn.websocket.util import parse_url
 
 from autobahn.wamp.message import _URI_PAT_STRICT_NON_EMPTY
 from autobahn.wamp.message import _URI_PAT_STRICT_LAST_EMPTY
+from autobahn.wamp.uri import convert_starred_uri
 
-from crossbar._logging import make_logger
+from txaio import make_logger
 
-import yaml
-from yaml import Loader, SafeLoader
+from yaml import Loader, SafeLoader, Dumper, SafeDumper
+from yaml.constructor import ConstructorError
+
+if six.PY3:
+    from collections.abc import Mapping, Sequence
+else:
+    from collections import Mapping, Sequence
 
 __all__ = ('check_config',
            'check_config_file',
            'convert_config_file',
            'check_guest')
 
+
+LATEST_CONFIG_VERSION = 2
+"""
+The current configuration file version.
+"""
 
 NODE_RUN_STANDALONE = u'runmode_standalone'
 """
@@ -144,18 +158,88 @@ def pprint_json(obj, log_to=None):
         print(output_str)
 
 
-# Hack: force PyYAML to parse _all_ strings into Unicode (as we want for CB configs)
-#
-# http://stackoverflow.com/a/2967461/884770
-#
+# Force PyYAML to parse _all_ strings into Unicode (as we want for CB configs)
+# see: http://stackoverflow.com/a/2967461/884770
 def construct_yaml_str(self, node):
     return self.construct_scalar(node)
 
-Loader.add_constructor(u'tag:yaml.org,2002:str', construct_yaml_str)
-SafeLoader.add_constructor(u'tag:yaml.org,2002:str', construct_yaml_str)
+for Klass in [Loader, SafeLoader]:
+    Klass.add_constructor(u'tag:yaml.org,2002:str', construct_yaml_str)
 
 
-_ENV_VAR_PAT_STR = "^\$([A-Z0-9_]+)$"
+# Enable PyYAML to deserialize mappings into OrderedDicts
+# see: http://pyyaml.org/attachment/ticket/161/use_ordered_dict.py
+def construct_ordered_mapping(self, node, deep=False):
+    if not isinstance(node, yaml.MappingNode):
+        raise ConstructorError(None, None,
+                               "expected a mapping node, but found %s" % node.id,
+                               node.start_mark)
+    mapping = OrderedDict()
+    for key_node, value_node in node.value:
+        key = self.construct_object(key_node, deep=deep)
+        if not isinstance(key, Hashable):
+            raise ConstructorError("while constructing a mapping", node.start_mark,
+                                   "found unhashable key", key_node.start_mark)
+        value = self.construct_object(value_node, deep=deep)
+        mapping[key] = value
+    return mapping
+
+yaml.constructor.BaseConstructor.construct_mapping = construct_ordered_mapping
+
+
+def construct_yaml_map_with_ordered_dict(self, node):
+    data = OrderedDict()
+    yield data
+    value = self.construct_mapping(node)
+    data.update(value)
+
+for Klass in [Loader, SafeLoader]:
+    Klass.add_constructor('tag:yaml.org,2002:map',
+                          construct_yaml_map_with_ordered_dict)
+
+
+# Enable PyYAML to serialize OrderedDict
+def represent_ordered_dict(dump, tag, mapping, flow_style=None):
+    # the following works like BaseRepresenter.represent_mapping,
+    # but does not issue the sort().
+    # see: http://pyyaml.org/browser/pyyaml/trunk/lib/yaml/representer.py#L112
+    value = []
+    node = yaml.MappingNode(tag, value, flow_style=flow_style)
+    if dump.alias_key is not None:
+        dump.represented_objects[dump.alias_key] = node
+    best_style = True
+    if hasattr(mapping, 'items'):
+        mapping = mapping.items()
+        # mapping.sort()
+    for item_key, item_value in mapping:
+        node_key = dump.represent_data(item_key)
+        node_value = dump.represent_data(item_value)
+        if not (isinstance(node_key, yaml.ScalarNode) and not node_key.style):
+            best_style = False
+        if not (isinstance(node_value, yaml.ScalarNode) and not node_value.style):
+            best_style = False
+        value.append((node_key, node_value))
+    if flow_style is None:
+        if dump.default_flow_style is not None:
+            node.flow_style = dump.default_flow_style
+        else:
+            node.flow_style = best_style
+    return node
+
+for Klass in [Dumper, SafeDumper]:
+    Klass.add_representer(OrderedDict,
+                          lambda dumper, value: represent_ordered_dict(dumper, u'tag:yaml.org,2002:map', value))
+
+
+# Environment variable names used by the utilities in the Shell and Utilities volume
+# of IEEE Std 1003.1-2001 consist solely of uppercase letters, digits, and the '_' (underscore)
+# from the characters defined in Portable Character Set and do not begin with a digit. Other
+# characters may be permitted by an implementation; applications shall tolerate the presence
+# of such names.
+
+# http://stackoverflow.com/a/2821183/884770
+
+_ENV_VAR_PAT_STR = "^\$([a-zA-Z_][a-zA-Z0-9_]*)$"
 _ENV_VAR_PAT = re.compile(_ENV_VAR_PAT_STR)
 
 
@@ -164,7 +248,10 @@ def _readenv(var, msg):
     if match and match.groups():
         envvar = match.groups()[0]
         if envvar in os.environ:
-            return os.environ[envvar]
+            value = os.environ[envvar]
+            if six.PY2:
+                value = value.decode('utf8')
+            return value
         else:
             raise InvalidConfigException("{} - environment variable '{}' not set".format(msg, var))
     else:
@@ -181,7 +268,9 @@ def maybe_from_env(config_item, value):
         if match and match.groups():
             var = match.groups()[0]
             if var in os.environ:
-                new_value = os.environ[var].decode('utf8')
+                new_value = os.environ[var]
+                if six.PY2:
+                    new_value = new_value.decode('utf8')
                 # for security reasons, we log only a starred version of the value read!
                 log.info("Configuration '{config_item}' set from environment variable ${var}", config_item=config_item, var=var)
                 return new_value
@@ -211,7 +300,10 @@ def get_config_value(config, item, default=None):
             if match and match.groups():
                 envvar = match.groups()[0]
                 if envvar in os.environ:
-                    return os.environ[envvar]
+                    value = os.environ[envvar]
+                    if six.PY2:
+                        value = value.decode('utf8')
+                    return value
                 else:
                     # item value seems to point to an enviroment variable,
                     # but the enviroment variable isn't set
@@ -256,14 +348,20 @@ def check_dict_args(spec, config, msg):
     2-tuple, for which the first item being whether or not it is mandatory, and
     the second being a list of types of which the config item can be.
     """
-    if not isinstance(config, dict):
+    if not isinstance(config, Mapping):
         raise InvalidConfigException("{} - invalid type for configuration item - expected dict, got {}".format(msg, type(config).__name__))
 
     for k in config:
         if k not in spec:
             raise InvalidConfigException("{} - encountered unknown attribute '{}'".format(msg, k))
-        if spec[k][1] and type(config[k]) not in spec[k][1]:
-            raise InvalidConfigException("{} - invalid type {} encountered for attribute '{}', must be one of ({})".format(msg, type(config[k]).__name__, k, ', '.join([x.__name__ for x in spec[k][1]])))
+        if spec[k][1]:
+            valid_type = False
+            for t in spec[k][1]:
+                if isinstance(config[k], t):
+                    valid_type = True
+                    break
+            if not valid_type:
+                raise InvalidConfigException("{} - invalid type {} encountered for attribute '{}', must be one of ({})".format(msg, type(config[k]).__name__, k, ', '.join([x.__name__ for x in spec[k][1]])))
 
     mandatory_keys = [k for k in spec if spec[k][0]]
     for k in mandatory_keys:
@@ -296,7 +394,7 @@ def check_transport_auth_ticket(config):
         if 'principals' not in config:
             raise InvalidConfigException("missing mandatory attribute 'principals' in static WAMP-Ticket configuration")
 
-        if not isinstance(config['principals'], dict):
+        if not isinstance(config['principals'], Mapping):
             raise InvalidConfigException("invalid type for attribute 'principals' in static WAMP-Ticket configuration - expected dict, got {}".format(type(config['users'])))
 
         # check map of principals
@@ -314,7 +412,7 @@ def check_transport_auth_ticket(config):
             raise InvalidConfigException("missing mandatory attribute 'authenticator' in dynamic WAMP-Ticket configuration")
         check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in dynamic WAMP-Ticket configuration".format(config['authenticator']))
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
 def check_transport_auth_wampcra(config):
@@ -333,7 +431,7 @@ def check_transport_auth_wampcra(config):
     if config['type'] == 'static':
         if 'users' not in config:
             raise InvalidConfigException("missing mandatory attribute 'users' in static WAMP-CRA configuration")
-        if not isinstance(config['users'], dict):
+        if not isinstance(config['users'], Mapping):
             raise InvalidConfigException("invalid type for attribute 'users' in static WAMP-CRA configuration - expected dict, got {}".format(type(config['users'])))
         for authid, user in config['users'].items():
             check_dict_args({
@@ -352,7 +450,7 @@ def check_transport_auth_wampcra(config):
             raise InvalidConfigException("missing mandatory attribute 'authenticator' in dynamic WAMP-CRA configuration")
         check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in dynamic WAMP-CRA configuration".format(config['authenticator']))
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
 def check_transport_auth_tls(config):
@@ -376,7 +474,7 @@ def check_transport_auth_tls(config):
             raise InvalidConfigException("missing mandatory attribute 'authenticator' in dynamic WAMP-TLS configuration")
         check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in dynamic WAMP-TLS configuration".format(config['authenticator']))
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
 def check_transport_auth_cryptosign(config):
@@ -392,21 +490,24 @@ def check_transport_auth_cryptosign(config):
     if config['type'] == 'static':
         if 'principals' not in config:
             raise InvalidConfigException("missing mandatory attribute 'principals' in static WAMP-Cryptosign configuration")
-        if not isinstance(config['principals'], dict):
+        if not isinstance(config['principals'], Mapping):
             raise InvalidConfigException("invalid type for attribute 'principals' in static WAMP-Cryptosign configuration - expected dict, got {}".format(type(config['principals'])))
         for authid, principal in config['principals'].items():
             check_dict_args({
-                'pubkey': (True, [six.text_type]),
+                'authorized_keys': (True, [Sequence]),
                 'role': (True, [six.text_type]),
                 'realm': (False, [six.text_type]),
             }, principal, "WAMP-Cryptosign - principal '{}' configuration".format(authid))
+            for pubkey in principal['authorized_keys']:
+                if type(pubkey) != six.text_type:
+                    raise InvalidConfigException("invalid type {} for pubkey in authorized_keys of principal".format(type(pubkey)))
 
     elif config['type'] == 'dynamic':
         if 'authenticator' not in config:
             raise InvalidConfigException("missing mandatory attribute 'authenticator' in dynamic WAMP-Cryptosign configuration")
         check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in dynamic WAMP-Cryptosign configuration".format(config['authenticator']))
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
 def check_transport_auth_cookie(config):
@@ -426,9 +527,25 @@ def check_transport_auth_anonymous(config):
     http://crossbar.io/docs/Anonymous-Authentication
     https://github.com/crossbario/crossbardocs/blob/master/pages/docs/administration/auth/Anonymous-Authentication.md
     """
-    check_dict_args({
-        'role': (False, [six.text_type]),
-    }, config, "WAMP-Anonymous configuration")
+    if 'type' not in config:
+        raise InvalidConfigException("missing mandatory attribute 'type' in WAMP-Anonymous configuration")
+
+    if config['type'] not in ['static', 'dynamic']:
+        raise InvalidConfigException("invalid type '{}' in WAMP-Anonymous configuration - must be one of 'static', 'dynamic'".format(config['type']))
+
+    if config['type'] == 'static':
+        check_dict_args({
+            'type': (True, [six.text_type]),
+            'role': (False, [six.text_type]),
+        }, config, "WAMP-Anonymous configuration")
+
+    elif config['type'] == 'dynamic':
+        if 'authenticator' not in config:
+            raise InvalidConfigException("missing mandatory attribute 'authenticator' in dynamic WAMP-Anonymous configuration")
+        check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in dynamic WAMP-Anonymous configuration".format(config['authenticator']))
+
+    else:
+        raise InvalidConfigException('logic error')
 
 
 def check_transport_auth(auth):
@@ -438,7 +555,7 @@ def check_transport_auth(auth):
     http://crossbar.io/docs/
     https://github.com/crossbario/crossbardocs/blob/master/pages/docs/administration/auth/Authentication.md
     """
-    if not isinstance(auth, dict):
+    if not isinstance(auth, Mapping):
         raise InvalidConfigException("invalid type {} for authentication configuration item (dict expected)".format(type(auth)))
     CHECKS = {
         'anonymous': check_transport_auth_anonymous,
@@ -469,7 +586,8 @@ def check_cookie_store_file(store):
     """
     check_dict_args({
         'type': (True, [six.text_type]),
-        'filename': (False, [six.text_type])
+        'filename': (False, [six.text_type]),
+        'purge_on_startup': (False, [bool])
     }, store, "WebSocket memory-backed cookie store configuration")
 
 
@@ -488,7 +606,7 @@ def check_transport_cookie(cookie):
         'name': (False, [six.text_type]),
         'length': (False, six.integer_types),
         'max_age': (False, six.integer_types),
-        'store': (False, [dict])
+        'store': (False, [Mapping])
     }, cookie, "WebSocket cookie configuration")
 
     if 'name' in cookie:
@@ -521,7 +639,7 @@ def check_transport_cookie(cookie):
         elif store_type == 'file':
             check_cookie_store_file(store)
         else:
-            raise InvalidConfigException("logic error")
+            raise InvalidConfigException('logic error')
 
 
 def check_endpoint_backlog(backlog):
@@ -602,10 +720,10 @@ def check_listening_endpoint_tls(tls):
     check_dict_args({
         'key': (True, [six.text_type]),
         'certificate': (True, [six.text_type]),
-        'chain_certificates': (False, [list]),
+        'chain_certificates': (False, [Sequence]),
         'dhparam': (False, [six.text_type]),
         'ciphers': (False, [six.text_type]),
-        'ca_certificates': (False, [list]),
+        'ca_certificates': (False, [Sequence]),
     }, tls, "TLS listening endpoint")
 
     return
@@ -621,7 +739,7 @@ def check_connecting_endpoint_tls(tls):
     :param tls: The TLS configuration part of a connecting endpoint.
     :type tls: dict
     """
-    if not isinstance(tls, dict):
+    if not isinstance(tls, Mapping):
         raise InvalidConfigException("'tls' in connecting endpoint must be dictionary ({} encountered)".format(type(tls)))
 
     for k in tls:
@@ -636,7 +754,7 @@ def check_connecting_endpoint_tls(tls):
             )
 
     if 'ca_certificates' in tls:
-        if not isinstance(tls['ca_certificates'], list):
+        if not isinstance(tls['ca_certificates'], Sequence):
             raise InvalidConfigException("'ca_certificates' must be a list")
         for fname in tls['ca_certificates']:
             if not os.path.exists(fname):
@@ -786,7 +904,7 @@ def check_listening_endpoint(endpoint):
     :param endpoint: The listening endpoint configuration.
     :type endpoint: dict
     """
-    if not isinstance(endpoint, dict):
+    if not isinstance(endpoint, Mapping):
         raise InvalidConfigException("'endpoint' items must be dictionaries ({} encountered)\n\n{}".format(type(endpoint)))
 
     if 'type' not in endpoint:
@@ -801,7 +919,7 @@ def check_listening_endpoint(endpoint):
     elif etype == 'unix':
         check_listening_endpoint_unix(endpoint)
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
 def check_connecting_endpoint(endpoint):
@@ -814,7 +932,7 @@ def check_connecting_endpoint(endpoint):
     :param endpoint: The connecting endpoint configuration.
     :type endpoint: dict
     """
-    if not isinstance(endpoint, dict):
+    if not isinstance(endpoint, Mapping):
         raise InvalidConfigException("'endpoint' items must be dictionaries ({} encountered)\n\n{}".format(type(endpoint)))
 
     if 'type' not in endpoint:
@@ -829,7 +947,7 @@ def check_connecting_endpoint(endpoint):
     elif etype == 'unix':
         check_connecting_endpoint_unix(endpoint)
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
 def check_websocket_options(options):
@@ -842,7 +960,7 @@ def check_websocket_options(options):
     :param options: The options to check.
     :type options: dict
     """
-    if not isinstance(options, dict):
+    if not isinstance(options, Mapping):
         raise InvalidConfigException("WebSocket options must be a dictionary ({} encountered)".format(type(options)))
 
     for k in options:
@@ -904,10 +1022,10 @@ def check_web_path_service_websocket(config):
     check_dict_args({
         'type': (True, [six.text_type]),
         'url': (False, [six.text_type]),
-        'serializers': (False, [list]),
-        'cookie': (False, [dict]),
-        'auth': (False, [dict]),
-        'options': (False, [dict]),
+        'serializers': (False, [Sequence]),
+        'cookie': (False, [Mapping]),
+        'auth': (False, [Mapping]),
+        'options': (False, [Mapping]),
         'debug': (False, [bool])
     }, config, "Web transport 'WebSocket' path service")
 
@@ -924,7 +1042,7 @@ def check_web_path_service_websocket(config):
         if not isinstance(url, six.text_type):
             raise InvalidConfigException("'url' in WebSocket configuration must be str ({} encountered)".format(type(url)))
         try:
-            parseWsUrl(url)
+            parse_url(url)
         except InvalidConfigException as e:
             raise InvalidConfigException("invalid 'url' in WebSocket configuration : {}".format(e))
 
@@ -950,7 +1068,7 @@ def check_web_path_service_static(config):
         'directory': (False, [six.text_type]),
         'package': (False, [six.text_type]),
         'resource': (False, [six.text_type]),
-        'options': (False, [dict])
+        'options': (False, [Mapping])
     }, config, "Web transport 'static' path service")
 
     if 'directory' in config:
@@ -963,7 +1081,7 @@ def check_web_path_service_static(config):
     if 'options' in config:
         check_dict_args({
             'enable_directory_listing': (False, [bool]),
-            'mime_types': (False, [dict]),
+            'mime_types': (False, [Mapping]),
             'cache_timeout': (False, list(six.integer_types) + [type(None)])
         }, config['options'], "'options' in Web transport 'static' path service")
 
@@ -982,8 +1100,8 @@ def check_web_path_service_wsgi(config):
         'type': (True, [six.text_type]),
         'module': (True, [six.text_type]),
         'object': (True, [six.text_type]),
-        'minthreads': (False, [int]),
-        'maxthreads': (False, [int]),
+        'minthreads': (False, six.integer_types),
+        'maxthreads': (False, six.integer_types),
     }, config, "Web transport 'wsgi' path service")
 
 
@@ -1020,6 +1138,24 @@ def check_web_path_service_redirect(config):
     }, config, "Web transport 'redirect' path service")
 
 
+def check_web_path_service_reverseproxy(config):
+    """
+    Check a "reverseproxy" path service on Web transport.
+
+    http://crossbar.io/docs/
+    https://github.com/crossbario/crossbardocs/blob/master/pages/docs/administration/web-service/Web-ReverseProxy-Service.md
+
+    :param config: The path service configuration.
+    :type config: dict
+    """
+    check_dict_args({
+        'type': (True, [six.text_type]),
+        'host': (True, [six.text_type]),
+        'port': (False, [six.integer_types]),
+        'path': (False, [six.text_type])
+    }, config, "Web transport 'reverseproxy' path service")
+
+
 def check_web_path_service_json(config):
     """
     Check a "json" path service on Web transport.
@@ -1033,7 +1169,7 @@ def check_web_path_service_json(config):
     check_dict_args({
         'type': (True, [six.text_type]),
         'value': (True, None),
-        'options': (False, [dict]),
+        'options': (False, [Mapping]),
     }, config, "Web transport 'json' path service")
 
     if 'options' in config:
@@ -1073,7 +1209,7 @@ def check_web_path_service_longpoll(config):
     """
     check_dict_args({
         'type': (True, [six.text_type]),
-        'options': (False, [dict]),
+        'options': (False, [Mapping]),
     }, config, "Web transport 'longpoll' path service")
 
     if 'options' in config:
@@ -1127,7 +1263,7 @@ def check_web_path_service_publisher(config):
         'type': (True, [six.text_type]),
         'realm': (True, [six.text_type]),
         'role': (True, [six.text_type]),
-        'options': (False, [dict]),
+        'options': (False, [Mapping]),
     }, config, "Web transport 'publisher' path service")
 
     if 'options' in config:
@@ -1136,7 +1272,7 @@ def check_web_path_service_publisher(config):
             'key': (False, [six.text_type]),
             'secret': (False, [six.text_type]),
             'require_tls': (False, [bool]),
-            'require_ip': (False, [list]),
+            'require_ip': (False, [Sequence]),
             'post_body_limit': (False, six.integer_types),
             'timestamp_delta_limit': (False, six.integer_types),
         }, config['options'], "Web transport 'publisher' path service")
@@ -1162,7 +1298,7 @@ def check_web_path_service_webhook(config):
         'type': (True, [six.text_type]),
         'realm': (True, [six.text_type]),
         'role': (True, [six.text_type]),
-        'options': (True, [dict]),
+        'options': (True, [Mapping]),
     }, config, "Web transport 'webhook' path service")
 
     check_dict_args({
@@ -1189,7 +1325,7 @@ def check_web_path_service_caller(config):
         'type': (True, [six.text_type]),
         'realm': (True, [six.text_type]),
         'role': (True, [six.text_type]),
-        'options': (False, [dict]),
+        'options': (False, [Mapping]),
     }, config, "Web transport 'caller' path service")
 
     if 'options' in config:
@@ -1198,7 +1334,7 @@ def check_web_path_service_caller(config):
             'key': (False, [six.text_type]),
             'secret': (False, [six.text_type]),
             'require_tls': (False, [bool]),
-            'require_ip': (False, [list]),
+            'require_ip': (False, [Sequence]),
             'post_body_limit': (False, six.integer_types),
             'timestamp_delta_limit': (False, six.integer_types),
         }, config['options'], "Web transport 'caller' path service")
@@ -1227,7 +1363,7 @@ def check_web_path_service_path(config):
     """
     check_dict_args({
         'type': (True, [six.text_type]),
-        'paths': (True, [dict]),
+        'paths': (True, [Mapping]),
     }, config, "Web transport 'path' path service")
 
     # check nested paths
@@ -1265,8 +1401,8 @@ def check_web_path_service_upload(config):
         'role': (True, [six.text_type]),
         'directory': (True, [six.text_type]),
         'temp_directory': (False, [six.text_type]),
-        'form_fields': (True, [dict]),
-        'options': (False, [dict])
+        'form_fields': (True, [Mapping]),
+        'options': (False, [Mapping])
     }, config, "Web transport 'upload' path service")
 
     check_dict_args({
@@ -1289,7 +1425,7 @@ def check_web_path_service_upload(config):
     if 'options' in config:
         check_dict_args({
             'max_file_size': (False, six.integer_types),
-            'file_types': (False, [list]),
+            'file_types': (False, [Sequence]),
             'file_permissions': (False, [six.text_type])
         }, config['options'], "Web transport 'upload' path service")
 
@@ -1314,10 +1450,10 @@ def check_web_path_service(path, config, nested):
 
     ptype = config['type']
     if path == '/' and not nested:
-        if ptype not in ['static', 'wsgi', 'redirect', 'publisher', 'caller', 'resource', 'webhook']:
+        if ptype not in ['static', 'wsgi', 'redirect', 'reverseproxy', 'publisher', 'caller', 'resource', 'webhook']:
             raise InvalidConfigException("invalid type '{}' for root-path service in Web transport path service '{}' configuration\n\n{}".format(ptype, path, config))
     else:
-        if ptype not in ['websocket', 'static', 'wsgi', 'redirect', 'json', 'cgi', 'longpoll', 'publisher', 'caller', 'webhook', 'schemadoc', 'path', 'resource', 'upload']:
+        if ptype not in ['websocket', 'static', 'wsgi', 'redirect', 'reverseproxy', 'json', 'cgi', 'longpoll', 'publisher', 'caller', 'webhook', 'schemadoc', 'path', 'resource', 'upload']:
             raise InvalidConfigException("invalid type '{}' for sub-path service in Web transport path service '{}' configuration\n\n{}".format(ptype, path, config))
 
     checkers = {
@@ -1327,6 +1463,7 @@ def check_web_path_service(path, config, nested):
         'websocket': check_web_path_service_websocket,
         'longpoll': check_web_path_service_longpoll,
         'redirect': check_web_path_service_redirect,
+        'reverseproxy': check_web_path_service_reverseproxy,
         'json': check_web_path_service_json,
         'cgi': check_web_path_service_cgi,
         'wsgi': check_web_path_service_wsgi,
@@ -1366,14 +1503,14 @@ def check_listening_transport_web(transport):
         raise InvalidConfigException("missing mandatory attribute 'paths' in Web transport item\n\n{}".format(pformat(transport)))
 
     paths = transport['paths']
-    if not isinstance(paths, dict):
+    if not isinstance(paths, Mapping):
         raise InvalidConfigException("'paths' attribute in Web transport configuration must be dictionary ({} encountered)".format(type(paths)))
 
     check_paths(paths)
 
     if 'options' in transport:
         options = transport['options']
-        if not isinstance(options, dict):
+        if not isinstance(options, Mapping):
             raise InvalidConfigException("'options' in Web transport must be dictionary ({} encountered)".format(type(options)))
 
         if 'access_log' in options:
@@ -1458,7 +1595,7 @@ def check_listening_transport_websocket(transport):
 
     if 'serializers' in transport:
         serializers = transport['serializers']
-        if not isinstance(serializers, list):
+        if not isinstance(serializers, Sequence):
             raise InvalidConfigException("'serializers' in WebSocket transport configuration must be list ({} encountered)".format(type(serializers)))
 
     if 'debug' in transport:
@@ -1471,7 +1608,7 @@ def check_listening_transport_websocket(transport):
         if not isinstance(url, six.text_type):
             raise InvalidConfigException("'url' in WebSocket transport configuration must be str ({} encountered)".format(type(url)))
         try:
-            parseWsUrl(url)
+            parse_url(url)
         except InvalidConfigException as e:
             raise InvalidConfigException("invalid 'url' in WebSocket transport configuration : {}".format(e))
 
@@ -1523,7 +1660,7 @@ def check_listening_transport_websocket_testee(transport):
         if not isinstance(url, six.text_type):
             raise InvalidConfigException("'url' in WebSocket-Testee transport configuration must be str ({} encountered)".format(type(url)))
         try:
-            parseWsUrl(url)
+            parse_url(url)
         except InvalidConfigException as e:
             raise InvalidConfigException("invalid 'url' in WebSocket-Testee transport configuration : {}".format(e))
 
@@ -1594,7 +1731,7 @@ def check_listening_transport_flashpolicy(transport):
 
     if 'allowed_ports' in transport:
         allowed_ports = transport['allowed_ports']
-        if not isinstance(allowed_ports, list):
+        if not isinstance(allowed_ports, Sequence):
             raise InvalidConfigException("'allowed_ports' in Flash-policy transport configuration must be list of integers ({} encountered)".format(type(allowed_ports)))
         for port in allowed_ports:
             check_endpoint_port(port, "Flash-policy allowed_ports")
@@ -1632,7 +1769,7 @@ def check_listening_transport_rawsocket(transport):
 
     if 'serializers' in transport:
         serializers = transport['serializers']
-        if not isinstance(serializers, list):
+        if not isinstance(serializers, Sequence):
             raise InvalidConfigException("'serializers' in RawSocket transport configuration must be list ({} encountered)".format(type(serializers)))
         for serializer in serializers:
             if serializer not in [u'json', u'msgpack', u'cbor']:
@@ -1660,7 +1797,7 @@ def check_connecting_transport_websocket(transport):
     :type transport: dict
     """
     for k in transport:
-        if k not in ['id', 'type', 'endpoint', 'url', 'serializers', 'debug', 'debug_wamp', 'options']:
+        if k not in ['id', 'type', 'endpoint', 'url', 'serializers', 'options']:
             raise InvalidConfigException("encountered unknown attribute '{}' in WebSocket transport configuration".format(k))
 
     if 'id' in transport:
@@ -1676,18 +1813,8 @@ def check_connecting_transport_websocket(transport):
 
     if 'serializers' in transport:
         serializers = transport['serializers']
-        if not isinstance(serializers, list):
+        if not isinstance(serializers, Sequence):
             raise InvalidConfigException("'serializers' in WebSocket transport configuration must be list ({} encountered)".format(type(serializers)))
-
-    if 'debug' in transport:
-        debug = transport['debug']
-        if not isinstance(debug, bool):
-            raise InvalidConfigException("'debug' in WebSocket transport configuration must be boolean ({} encountered)".format(type(debug)))
-
-    if 'debug_wamp' in transport:
-        debug_wamp = transport['debug_wamp']
-        if not isinstance(debug_wamp, bool):
-            raise InvalidConfigException("'debug_wamp' in WebSocket transport configuration must be boolean ({} encountered)".format(type(debug_wamp)))
 
     if 'url' not in transport:
         raise InvalidConfigException("missing mandatory attribute 'url' in WebSocket transport item\n\n{}".format(pformat(transport)))
@@ -1696,7 +1823,7 @@ def check_connecting_transport_websocket(transport):
     if not isinstance(url, six.text_type):
         raise InvalidConfigException("'url' in WebSocket transport configuration must be str ({} encountered)".format(type(url)))
     try:
-        parseWsUrl(url)
+        parse_url(url)
     except InvalidConfigException as e:
         raise InvalidConfigException("invalid 'url' in WebSocket transport configuration : {}".format(e))
 
@@ -1738,7 +1865,7 @@ def check_connecting_transport_rawsocket(transport):
             raise InvalidConfigException("'debug' in RawSocket transport configuration must be boolean ({} encountered)".format(type(debug)))
 
 
-def check_router_transport(transport, silence=False):
+def check_router_transport(transport):
     """
     Check router transports.
 
@@ -1747,7 +1874,7 @@ def check_router_transport(transport, silence=False):
     :param transport: Router transport item to check.
     :type transport: dict
     """
-    if not isinstance(transport, dict):
+    if not isinstance(transport, Mapping):
         raise InvalidConfigException("'transport' items must be dictionaries ({} encountered)\n\n{}".format(type(transport), pformat(transport)))
 
     if 'type' not in transport:
@@ -1783,10 +1910,10 @@ def check_router_transport(transport, silence=False):
         check_listening_transport_stream_testee(transport)
 
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
-def check_router_component(component, silence=False):
+def check_router_component(component):
     """
     Check a component configuration for a component running side-by-side with
     a router.
@@ -1796,7 +1923,7 @@ def check_router_component(component, silence=False):
     :param component: The component configuration.
     :type component: dict
     """
-    if not isinstance(component, dict):
+    if not isinstance(component, Mapping):
         raise InvalidConfigException("components must be dictionaries ({} encountered)".format(type(component)))
 
     if 'type' not in component:
@@ -1812,7 +1939,7 @@ def check_router_component(component, silence=False):
             'type': (True, [six.text_type]),
             'realm': (True, [six.text_type]),
             'role': (False, [six.text_type]),
-            'references': (False, [list]),
+            'references': (False, [Sequence]),
 
             'package': (True, [six.text_type]),
             'entrypoint': (True, [six.text_type]),
@@ -1825,17 +1952,17 @@ def check_router_component(component, silence=False):
             'type': (True, [six.text_type]),
             'realm': (True, [six.text_type]),
             'role': (False, [six.text_type]),
-            'references': (False, [list]),
+            'references': (False, [Sequence]),
 
             'classname': (True, [six.text_type]),
             'extra': (False, None),
         }, component, "invalid component configuration")
 
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
-def check_connecting_transport(transport, silence=False):
+def check_connecting_transport(transport):
     """
     Check container transports.
 
@@ -1844,7 +1971,7 @@ def check_connecting_transport(transport, silence=False):
     :param transport: Container transport item to check.
     :type transport: dict
     """
-    if not isinstance(transport, dict):
+    if not isinstance(transport, Mapping):
         raise InvalidConfigException("'transport' items must be dictionaries ({} encountered)\n\n{}".format(type(transport), pformat(transport)))
 
     if 'type' not in transport:
@@ -1861,10 +1988,10 @@ def check_connecting_transport(transport, silence=False):
         check_connecting_transport_rawsocket(transport)
 
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
-def check_container_component(component, silence=False):
+def check_container_component(component):
     """
     Check a container component configuration.
 
@@ -1873,7 +2000,7 @@ def check_container_component(component, silence=False):
     :param component: The component configuration to check.
     :type component: dict
     """
-    if not isinstance(component, dict):
+    if not isinstance(component, Mapping):
         raise InvalidConfigException("components must be dictionaries ({} encountered)".format(type(component)))
 
     if 'type' not in component:
@@ -1888,7 +2015,7 @@ def check_container_component(component, silence=False):
             'id': (False, [six.text_type]),
             'type': (True, [six.text_type]),
             'realm': (True, [six.text_type]),
-            'transport': (True, [dict]),
+            'transport': (True, [Mapping]),
 
             'package': (True, [six.text_type]),
             'entrypoint': (True, [six.text_type]),
@@ -1900,43 +2027,43 @@ def check_container_component(component, silence=False):
             'id': (False, [six.text_type]),
             'type': (True, [six.text_type]),
             'realm': (True, [six.text_type]),
-            'transport': (True, [dict]),
+            'transport': (True, [Mapping]),
 
             'classname': (True, [six.text_type]),
             'extra': (False, None),
         }, component, "invalid component configuration")
 
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
     check_connecting_transport(component['transport'])
 
 
-def check_container_components(components, silence=False):
+def check_container_components(components):
     """
     Check components inside a container.
 
     https://github.com/crossbario/crossbardocs/blob/master/pages/docs/administration/worker/Container-Configuration.md
     """
-    if not isinstance(components, list):
+    if not isinstance(components, Sequence):
         raise InvalidConfigException("'components' items must be lists ({} encountered)".format(type(components)))
 
     for i, component in enumerate(components):
         log.debug("Checking container component item {} ..".format(i))
-        check_container_component(component, silence)
+        check_container_component(component)
 
 
-def check_router_realm(realm, silence=False):
+def check_router_realm(realm):
     """
     Checks the configuration for a router realm entry, which can be *either* a dynamic authorizer or static permissions.
     """
     # router/router.py and router/role.py
 
     for role in realm.get('roles', []):
-        check_router_realm_role(role, silence=silence)
+        check_router_realm_role(role)
 
 
-def check_router_realm_role(role, silence=False):
+def check_router_realm_role(role):
     """
     Checks a single role from a router realm 'roles' list
     """
@@ -1956,14 +2083,14 @@ def check_router_realm_role(role, silence=False):
     # 'static' permissions
     if 'permissions' in role:
         permissions = role['permissions']
-        if not isinstance(permissions, list):
+        if not isinstance(permissions, Sequence):
             raise InvalidConfigException(
                 "'permissions' in 'role' must be a list "
                 "({} encountered)".format(type(permissions))
             )
 
         for role in permissions:
-            if not isinstance(role, dict):
+            if not isinstance(role, Mapping):
                 raise InvalidConfigException(
                     "each role in 'permissions' must be a dict ({} encountered)".format(type(role))
                 )
@@ -1983,27 +2110,46 @@ def check_router_realm_role(role, silence=False):
                 raise InvalidConfigException(
                     "invalid role URI '{}' in role permissions".format(role['uri']),
                 )
+
             check_dict_args({
                 'uri': (True, [six.text_type]),
-                'call': (False, [bool]),
-                'register': (False, [bool]),
-                'publish': (False, [bool]),
-                'subscribe': (False, [bool]),
+                'match': (False, [six.text_type]),
+                'allow': (False, [Mapping]),
+                'disclose': (False, [Mapping]),
+                'cache': (False, [bool]),
             }, role, "invalid grant in role permissions")
 
+            if 'match' in role:
+                if role['match'] not in [u'exact', u'prefix', u'wildcard']:
+                    raise InvalidConfigException("invalid value '{}' for 'match' attribute in role permissions".format(role['match']))
 
-def check_router_components(components, silence=False):
+            if 'allow' in role:
+                check_dict_args({
+                    'call': (False, [bool]),
+                    'register': (False, [bool]),
+                    'publish': (False, [bool]),
+                    'subscribe': (False, [bool]),
+                }, role['allow'], "invalid allow in role permissions")
+
+            if 'disclose' in role:
+                check_dict_args({
+                    'caller': (False, [bool]),
+                    'publisher': (False, [bool]),
+                }, role['disclose'], "invalid disclose in role permissions")
+
+
+def check_router_components(components):
     """
     Check the components that go inside a router.
 
     https://github.com/crossbario/crossbardocs/blob/master/pages/docs/administration/worker/Router-Configuration.md
     """
-    if not isinstance(components, list):
+    if not isinstance(components, Sequence):
         raise InvalidConfigException("'components' items must be lists ({} encountered)".format(type(components)))
 
     for i, component in enumerate(components):
         log.debug("Checking router component item {} ..".format(i))
-        check_router_component(component, silence)
+        check_router_component(component)
 
 
 def check_connection(connection):
@@ -2029,7 +2175,7 @@ def check_connection(connection):
             'database': (True, [six.text_type]),
             'user': (True, [six.text_type]),
             'password': (True, [six.text_type]),
-            'options': (False, [dict]),
+            'options': (False, [Mapping]),
         }, connection, "PostgreSQL connection configuration")
 
         if 'port' in connection:
@@ -2042,14 +2188,14 @@ def check_connection(connection):
             }, connection['options'], "PostgreSQL connection options")
 
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
-def check_connections(connections, silence=False):
+def check_connections(connections):
     """
     Connections can be present in controller, router and container processes.
     """
-    if not isinstance(connections, list):
+    if not isinstance(connections, Sequence):
         raise InvalidConfigException("'connections' items must be lists ({} encountered)".format(type(connections)))
 
     for i, connection in enumerate(connections):
@@ -2057,13 +2203,13 @@ def check_connections(connections, silence=False):
         check_connection(connection)
 
 
-def check_transports(transports, silence=False):
+def check_transports(transports):
     """
     Transports can only be present in router workers.
     """
 
 
-def check_router(router, silence=False):
+def check_router(router):
     """
     Checks a router worker configuration.
 
@@ -2088,35 +2234,35 @@ def check_router(router, silence=False):
     #
     realms = router.get('realms', [])
 
-    if not isinstance(realms, list):
+    if not isinstance(realms, Sequence):
         raise InvalidConfigException("'realms' items must be lists ({} encountered)\n\n{}".format(type(realms), pformat(router)))
 
     for i, realm in enumerate(realms):
         log.debug("Checking realm item {} ..".format(i))
-        check_router_realm(realm, silence)
+        check_router_realm(realm)
 
     # transports
     #
     transports = router.get('transports', [])
-    if not isinstance(transports, list):
+    if not isinstance(transports, Sequence):
         raise InvalidConfigException("'transports' items must be lists ({} encountered)\n\n{}".format(type(transports), pformat(router)))
 
     for i, transport in enumerate(transports):
         log.debug("Checking transport item {} ..".format(i))
-        check_router_transport(transport, silence)
+        check_router_transport(transport)
 
     # connections
     #
     connections = router.get('connections', [])
-    check_connections(connections, silence=silence)
+    check_connections(connections)
 
     # components
     #
     components = router.get('components', [])
-    check_router_components(components, silence=silence)
+    check_router_components(components)
 
 
-def check_container(container, silence=False):
+def check_container(container):
     """
     Checks a container worker configuration.
 
@@ -2140,12 +2286,12 @@ def check_container(container, silence=False):
     # connections
     #
     connections = container.get('connections', [])
-    check_connections(connections, silence=silence)
+    check_connections(connections)
 
     # components
     #
     components = container.get('components', [])
-    check_container_components(components, silence=silence)
+    check_container_components(components)
 
 
 def check_router_options(options):
@@ -2160,7 +2306,7 @@ def check_websocket_testee_options(options):
     check_native_worker_options(options)
 
 
-def check_manhole(manhole, silence=False):
+def check_manhole(manhole):
     """
     Check a process manhole configuration.
 
@@ -2170,7 +2316,7 @@ def check_manhole(manhole, silence=False):
     :param manhole: The manhole configuration to check.
     :type manhole: dict
     """
-    if not isinstance(manhole, dict):
+    if not isinstance(manhole, Mapping):
         raise InvalidConfigException("'manhole' items must be dictionaries ({} encountered)\n\n{}".format(type(manhole), pformat(manhole)))
 
     for k in manhole:
@@ -2186,11 +2332,11 @@ def check_manhole(manhole, silence=False):
         raise InvalidConfigException("missing mandatory attribute 'users' in Manhole item\n\n{}".format(pformat(manhole)))
 
     users = manhole['users']
-    if not isinstance(users, list):
+    if not isinstance(users, Sequence):
         raise InvalidConfigException("'manhole.users' items must be lists ({} encountered)\n\n{}".format(type(users), pformat(users)))
 
     for user in users:
-        if not isinstance(user, dict):
+        if not isinstance(user, Mapping):
             raise InvalidConfigException("'manhole.users.user' items must be dictionaries ({} encountered)\n\n{}".format(type(user), pformat(user)))
 
         for k in user:
@@ -2204,7 +2350,7 @@ def check_manhole(manhole, silence=False):
             raise InvalidConfigException("missing mandatory attribute 'password' in Manhole user item\n\n{}".format(pformat(user)))
 
 
-def check_process_env(env, silence=False):
+def check_process_env(env):
     """
     Check a worker process environment configuration.
 
@@ -2214,7 +2360,7 @@ def check_process_env(env, silence=False):
     :param env: The `env` part of the worker options.
     :type env: dict
     """
-    if not isinstance(env, dict):
+    if not isinstance(env, Mapping):
         raise InvalidConfigException("'env' in 'options' in worker/guest configuration must be dict ({} encountered)".format(type(env)))
 
     for k in env:
@@ -2225,7 +2371,7 @@ def check_process_env(env, silence=False):
         inherit = env['inherit']
         if isinstance(inherit, bool):
             pass
-        elif isinstance(inherit, list):
+        elif isinstance(inherit, Sequence):
             for v in inherit:
                 if not isinstance(v, six.text_type):
                     raise InvalidConfigException("invalid type for inherited env var name in 'inherit' in 'options.env' in worker/guest configuration - must be a string ({} encountered)".format(type(v)))
@@ -2234,7 +2380,7 @@ def check_process_env(env, silence=False):
 
     if 'vars' in env:
         envvars = env['vars']
-        if not isinstance(envvars, dict):
+        if not isinstance(envvars, Mapping):
             raise InvalidConfigException("'options.env.vars' in worker/guest configuration must be dict ({} encountered)".format(type(envvars)))
 
         for k, v in envvars.items():
@@ -2244,7 +2390,7 @@ def check_process_env(env, silence=False):
                 raise InvalidConfigException("invalid type for environment variable value '{}' in 'options.env.vars' - must be a string ({} encountered)".format(v, type(v)))
 
 
-def check_native_worker_options(options, silence=False):
+def check_native_worker_options(options):
     """
     Check native worker options.
 
@@ -2255,7 +2401,7 @@ def check_native_worker_options(options, silence=False):
     :type options: dict
     """
 
-    if not isinstance(options, dict):
+    if not isinstance(options, Mapping):
         raise InvalidConfigException("'options' in worker configurations must be dictionaries ({} encountered)".format(type(options)))
 
     for k in options:
@@ -2269,7 +2415,7 @@ def check_native_worker_options(options, silence=False):
 
     if 'reactor' in options:
         _reactor = options['reactor']
-        if not isinstance(_reactor, dict):
+        if not isinstance(_reactor, Mapping):
             raise InvalidConfigException("'reactor' in 'options' in worker configuration must be a dict ({} encountered)".format(type(_reactor)))
 
     if 'python' in options:
@@ -2279,7 +2425,7 @@ def check_native_worker_options(options, silence=False):
 
     if 'pythonpath' in options:
         pythonpath = options['pythonpath']
-        if not isinstance(pythonpath, list):
+        if not isinstance(pythonpath, Sequence):
             raise InvalidConfigException("'pythonpath' in 'options' in worker configuration must be lists ({} encountered)".format(type(pythonpath)))
         for p in pythonpath:
             if not isinstance(p, six.text_type):
@@ -2287,7 +2433,7 @@ def check_native_worker_options(options, silence=False):
 
     if 'cpu_affinity' in options:
         cpu_affinity = options['cpu_affinity']
-        if not isinstance(cpu_affinity, list):
+        if not isinstance(cpu_affinity, Sequence):
             raise InvalidConfigException("'cpu_affinity' in 'options' in worker configuration must be lists ({} encountered)".format(type(cpu_affinity)))
         for a in cpu_affinity:
             if type(a) not in six.integer_types:
@@ -2297,7 +2443,7 @@ def check_native_worker_options(options, silence=False):
         check_process_env(options['env'])
 
 
-def check_guest(guest, silence=False):
+def check_guest(guest):
     """
     Check a guest worker configuration.
 
@@ -2316,8 +2462,8 @@ def check_guest(guest, silence=False):
         'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'executable': (True, [six.text_type]),
-        'arguments': (False, [list]),
-        'options': (False, [dict]),
+        'arguments': (False, [Sequence]),
+        'options': (False, [Mapping]),
     }, guest, "Guest process configuration")
 
     if guest['type'] != 'guest':
@@ -2331,16 +2477,16 @@ def check_guest(guest, silence=False):
     if 'options' in guest:
         options = guest['options']
 
-        if not isinstance(options, dict):
+        if not isinstance(options, Mapping):
             raise InvalidConfigException("'options' must be dictionaries ({} encountered)\n\n{}".format(type(options), pformat(guest)))
 
         check_dict_args({
-            'env': (False, [dict]),
+            'env': (False, [Mapping]),
             'workdir': (False, [six.text_type]),
-            'stdin': (False, [six.text_type, dict]),
+            'stdin': (False, [six.text_type, Mapping]),
             'stdout': (False, [six.text_type]),
             'stderr': (False, [six.text_type]),
-            'watch': (False, [dict]),
+            'watch': (False, [Mapping]),
         }, options, "Guest process configuration")
 
         for s in ['stdout', 'stderr']:
@@ -2349,7 +2495,7 @@ def check_guest(guest, silence=False):
                     raise InvalidConfigException("invalid value '{}' for '{}' in guest worker configuration".format(options[s], s))
 
         if 'stdin' in options:
-            if isinstance(options['stdin'], dict):
+            if isinstance(options['stdin'], Mapping):
                 check_dict_args({
                     'type': (True, [six.text_type]),
                     'value': (True, None),
@@ -2363,7 +2509,7 @@ def check_guest(guest, silence=False):
             check_process_env(options['env'])
 
 
-def check_websocket_testee(worker, silence=False):
+def check_websocket_testee(worker):
     """
     Checks a WebSocket testee worker configuration.
 
@@ -2383,7 +2529,7 @@ def check_websocket_testee(worker, silence=False):
     check_listening_transport_websocket(worker['transport'])
 
 
-def check_worker(worker, silence=False):
+def check_worker(worker):
     """
     Check a node worker configuration item.
 
@@ -2393,7 +2539,7 @@ def check_worker(worker, silence=False):
     :param worker: The worker configuration to check.
     :type worker: dict
     """
-    if not isinstance(worker, dict):
+    if not isinstance(worker, Mapping):
         raise InvalidConfigException("worker items must be dictionaries ({} encountered)\n\n{}".format(type(worker), pformat(worker)))
 
     if 'type' not in worker:
@@ -2405,22 +2551,22 @@ def check_worker(worker, silence=False):
         raise InvalidConfigException("invalid attribute value '{}' for attribute 'type' in worker item\n\n{}".format(ptype, pformat(worker)))
 
     if ptype == 'router':
-        check_router(worker, silence)
+        check_router(worker)
 
     elif ptype == 'container':
-        check_container(worker, silence)
+        check_container(worker)
 
     elif ptype == 'guest':
-        check_guest(worker, silence)
+        check_guest(worker)
 
     elif ptype == 'websocket-testee':
-        check_websocket_testee(worker, silence)
+        check_websocket_testee(worker)
 
     else:
-        raise InvalidConfigException("logic error")
+        raise InvalidConfigException('logic error')
 
 
-def check_controller_options(options, silence=False):
+def check_controller_options(options):
     """
     Check controller options.
 
@@ -2428,7 +2574,7 @@ def check_controller_options(options, silence=False):
     :type options: dict
     """
 
-    if not isinstance(options, dict):
+    if not isinstance(options, Mapping):
         raise InvalidConfigException("'options' in controller configuration must be a dictionary ({} encountered)\n\n{}".format(type(options)))
 
     for k in options:
@@ -2441,14 +2587,14 @@ def check_controller_options(options, silence=False):
             raise InvalidConfigException("'title' in 'options' in controller configuration must be a string ({} encountered)".format(type(title)))
 
     if 'shutdown' in options:
-        if type(options['shutdown']) != list:
+        if type(options['shutdown']) != Sequence:
             raise InvalidConfigException("invalid type {} for 'shutdown' in node controller options (must be a list)".format(type(options['shutdown_mode'])))
         for shutdown_mode in options['shutdown']:
             if shutdown_mode not in NODE_SHUTDOWN_MODES:
                 raise InvalidConfigException("invalid value '{}' for shutdown mode in controller options (permissible values: {})".format(shutdown_mode, ', '.join("'{}'".format(x) for x in NODE_SHUTDOWN_MODES)))
 
 
-def check_controller(controller, silence=False):
+def check_controller(controller):
     """
     Check a node controller configuration item.
 
@@ -2458,7 +2604,7 @@ def check_controller(controller, silence=False):
     :param controller: The controller configuration to check.
     :type controller: dict
     """
-    if not isinstance(controller, dict):
+    if not isinstance(controller, Mapping):
         raise InvalidConfigException("controller items must be dictionaries ({} encountered)\n\n{}".format(type(controller), pformat(controller)))
 
     for k in controller:
@@ -2483,33 +2629,33 @@ def check_controller(controller, silence=False):
     # connections
     #
     connections = controller.get('connections', [])
-    check_connections(connections, silence=silence)
+    check_connections(connections)
 
     return mode
 
 
-def check_cdc(config, silence=False):
+def check_cdc(config):
     """
     Check a node CDC configuration item.
 
     :param config: The CDC configuration to check.
     :type config: dict
     """
-    if not isinstance(config, dict):
+    if not isinstance(config, Mapping):
         raise InvalidConfigException("'config' item with CDC configuration must of type dictionary ({} encountered)\n\n{}".format(type(config), pformat(config)))
 
     check_dict_args({
         'enabled': (True, [bool]),
         'secret': (False, [six.text_type]),
         'realm': (False, [six.text_type]),
-        'transport': (False, [dict]),
+        'transport': (False, [Mapping]),
     }, config, "invalid 'cdc' configuration")
 
     if 'transport' in config:
         check_connecting_transport(config['transport'])
 
 
-def check_config(config, silence=False):
+def check_config(config):
     """
     Check a Crossbar.io top-level configuration.
 
@@ -2519,12 +2665,19 @@ def check_config(config, silence=False):
     :param config: The configuration to check.
     :type config: dict
     """
-    if not isinstance(config, dict):
+    if not isinstance(config, Mapping):
         raise InvalidConfigException("top-level configuration item must be a dictionary ({} encountered)".format(type(config)))
 
     for k in config:
-        if k not in ['controller', 'workers']:
+        if k not in ['version', 'controller', 'workers']:
             raise InvalidConfigException("encountered unknown attribute '{}' in top-level configuration".format(k))
+
+    version = config.get(u'version', 1)
+    if version not in range(1, LATEST_CONFIG_VERSION + 1):
+        raise InvalidConfigException("Invalid configuration version '{}' - must be 1..{}".format(version, LATEST_CONFIG_VERSION))
+
+    if version < LATEST_CONFIG_VERSION:
+        raise InvalidConfigException("Configuration too old: version {}, while current is {} - please upgrade using 'crossbar upgrade'".format(version, LATEST_CONFIG_VERSION))
 
     # check controller config
     #
@@ -2542,15 +2695,15 @@ def check_config(config, silence=False):
     # check worker configs
     #
     workers = config.get('workers', [])
-    if not isinstance(workers, list):
+    if not isinstance(workers, Sequence):
         raise InvalidConfigException("'workers' attribute in top-level configuration must be a list ({} encountered)".format(type(workers)))
 
     for i, worker in enumerate(workers):
         log.debug("Checking worker item {} ..".format(i))
-        check_worker(worker, silence)
+        check_worker(worker)
 
 
-def check_config_file(configfile, silence=False):
+def check_config_file(configfile):
     """
     Check a Crossbar.io local configuration file.
 
@@ -2560,19 +2713,24 @@ def check_config_file(configfile, silence=False):
     configext = os.path.splitext(configfile)[1]
     configfile = os.path.abspath(configfile)
 
+    if configext not in ['.json', '.yaml']:
+        raise Exception("invalid configuration file extension '{}'".format(configext))
+
     with open(configfile, 'r') as infile:
-        if configext == '.yaml':
+        if configext == '.json':
+            try:
+                config = json.load(infile, object_pairs_hook=OrderedDict)
+            except ValueError as e:
+                raise InvalidConfigException("configuration file does not seem to be proper JSON ('{}')".format(e))
+        elif configext == '.yaml':
             try:
                 config = yaml.safe_load(infile)
             except InvalidConfigException as e:
                 raise InvalidConfigException("configuration file does not seem to be proper YAML ('{}')".format(e))
         else:
-            try:
-                config = json.load(infile)
-            except ValueError as e:
-                raise InvalidConfigException("configuration file does not seem to be proper JSON ('{}')".format(e))
+            raise Exception('logic error')
 
-    check_config(config, silence)
+    check_config(config)
 
     return config
 
@@ -2603,7 +2761,7 @@ def convert_config_file(configfile):
         elif configext == ".json":
             log.info("converting JSON formatted configuration {} to YAML format ...".format(configfile))
             try:
-                config = json.load(infile)
+                config = json.load(infile, object_pairs_hook=OrderedDict)
             except ValueError as e:
                 raise InvalidConfigException("configuration file does not seem to be proper JSON ('{}')".format(e))
             else:
@@ -2616,7 +2774,7 @@ def convert_config_file(configfile):
             raise InvalidConfigException("configuration file needs to be '.json' or '.yaml'.")
 
 
-def fill_config_from_env(config, keys=None, debug=False):
+def fill_config_from_env(config, keys=None):
     """
     Fill in configuration values in a configuration dictionary from
     environment variables.
@@ -2642,3 +2800,115 @@ def fill_config_from_env(config, keys=None, debug=False):
                         log.debug("configuration parameter '{key}' set to '{val}' from environment variable {envvar}", key=k, val=val, envvar=envvar)
                     else:
                         log.debug("warning: configuration parameter '{key}' should have been read from enviroment variable {envvar}, but the latter is not set", key=k, envvar=envvar)
+
+
+def upgrade_config_file(configfile):
+    """
+    Upgrade a local node configuration file.
+
+    :param configfile: Path to the node config file to upgrade.
+    :type configfile: unicode
+    """
+    configext = os.path.splitext(configfile)[1]
+    configfile = os.path.abspath(configfile)
+
+    if configext not in ['.json', '.yaml']:
+        raise Exception("invalid configuration file extension '{}'".format(configext))
+
+    # read and parse existing config file
+    with open(configfile, 'r') as infile:
+        # existing config has JSON format
+        if configext == '.json':
+            try:
+                config = json.load(infile, object_pairs_hook=OrderedDict)
+            except ValueError as e:
+                raise InvalidConfigException("configuration file does not seem to be proper JSON: {}".format(e))
+
+        # existing config has YAML format
+        elif configext == '.yaml':
+            try:
+                config = yaml.safe_load(infile)
+            except ValueError as e:
+                raise InvalidConfigException("configuration file does not seem to be proper YAML: {}".format(e))
+
+        # should not arrive here
+        else:
+            raise Exception('logic error')
+
+    if not isinstance(config, Mapping):
+        raise InvalidConfigException("configuration top-level item must be a dict/mapping (was type {})".format(type(config), config))
+
+    if u'version' in config:
+        version = config[u'version']
+    else:
+        version = 1
+
+    LATEST_CONFIG_VERSION = 2
+
+    if version >= LATEST_CONFIG_VERSION:
+        print("Configuration already is at latest version {} - nothing to upgrade".format(LATEST_CONFIG_VERSION))
+        return
+
+    # stepwise upgrade from version to version up to current ..
+    while version < LATEST_CONFIG_VERSION:
+        print("Upgrading configuration from version {} to version {}".format(version, version + 1))
+
+        # upgrade from version 1 -> 2
+        if version == 1:
+            for worker in config.get(u'workers', []):
+                if worker[u'type'] == u'router':
+                    for realm in worker.get(u'realms', []):
+                        for role in realm.get(u'roles', []):
+                            # upgrade "permissions" subitem (if there is any)
+                            if u'permissions' in role:
+                                permissions = []
+                                for p in role[u'permissions']:
+                                    uri, match = convert_starred_uri(p[u'uri'])
+                                    pp = OrderedDict([
+                                        (u'uri', uri),
+                                        (u'match', match),
+                                        (u'allow', OrderedDict([
+                                            (u'call', p.get(u'call', False)),
+                                            (u'register', p.get(u'register', False)),
+                                            (u'publish', p.get(u'publish', False)),
+                                            (u'subscribe', p.get(u'subscribe', False))
+                                        ])),
+                                        (u'disclose', OrderedDict([
+                                            (u'caller', False),
+                                            (u'publisher', False),
+                                        ])),
+                                        (u'cache', True)
+                                    ])
+                                    permissions.append(pp)
+                                role[u'permissions'] = permissions
+        else:
+            raise Exception('logic error')
+
+        version += 1
+
+    # make sure the config version is there, and at top of config
+    config = OrderedDict([(u'version', version)] + list(config.items()))
+
+    # write out updated configuration ..
+    with open(configfile, 'wb') as outfile:
+        # write config in JSON format
+        if configext == '.json':
+            data = json.dumps(
+                config,
+                skipkeys=False,
+                sort_keys=False,
+                ensure_ascii=False,
+                separators=(',', ': '),
+                indent=4,
+            )
+            # ensure newline at end of file
+            data += u'\n'
+            outfile.write(data.encode('utf8'))
+
+        # write config in YAML format
+        elif configext == '.yaml':
+            yaml.safe_dump(config, outfile, default_flow_style=False)
+
+        # should not arrive here
+        else:
+            raise Exception('logic error')

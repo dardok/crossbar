@@ -30,14 +30,18 @@
 
 from __future__ import absolute_import, division, print_function
 
+import os
+import treq
+import six
+
 from twisted.internet import reactor, defer
 from twisted.internet.selectreactor import SelectReactor
-from twisted.python.filepath import FilePath
 
 from crossbar.test import TestCase
 from crossbar.router.role import RouterRoleStaticAuth, RouterPermissions
 from crossbar.worker import router
-from crossbar._logging import make_logger
+
+from txaio import make_logger
 
 from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.message import Publish, Published, Subscribe, Subscribed
@@ -49,7 +53,6 @@ from .examples.goodclass import _
 
 try:
     from twisted.web.wsgi import WSGIResource  # noqa
-    import treq
 except (ImportError, SyntaxError):
     WSGI_TESTS = "Twisted WSGI support is not available."
 else:
@@ -108,7 +111,7 @@ class RouterWorkerSessionTests(TestCase):
         """
         Set up the common component config.
         """
-        self.realm = "realm1"
+        self.realm = u"realm1"
         config_extras = DottableDict({"node": "testnode",
                                       "worker": "worker1",
                                       "cbdir": self.mktemp()})
@@ -148,16 +151,16 @@ class RouterWorkerSessionTests(TestCase):
                                           u'uri': u'*', u'publish': True}]}]
         }
 
-        r.start_router_realm("realm1", realm_config)
+        r.start_router_realm(u"realm1", realm_config)
 
-        permissions = RouterPermissions('', True, True, True, True, True)
+        permissions = RouterPermissions(u'', True, True, True, True, True)
         routera = r._router_factory.get(u'realm1')
         routera.add_role(RouterRoleStaticAuth(router, 'anonymous', default_permissions=permissions))
 
         component_config = {
-            "type": u"class",
-            "classname": u"crossbar.worker.test.examples.goodclass.AppSession",
-            "realm": u"realm1"
+            u"type": u"class",
+            u"classname": u"crossbar.worker.test.examples.goodclass.AppSession",
+            u"realm": u"realm1"
         }
 
         r.start_router_component("newcomponent", component_config)
@@ -191,12 +194,12 @@ class RouterWorkerSessionTests(TestCase):
                                           u'uri': u'*', u'publish': True}]}]
         }
 
-        r.start_router_realm("realm1", realm_config)
+        r.start_router_realm(u"realm1", realm_config)
 
         component_config = {
-            "type": u"class",
-            "classname": u"thisisathing.thatdoesnot.exist",
-            "realm": u"realm1"
+            u"type": u"class",
+            u"classname": u"thisisathing.thatdoesnot.exist",
+            u"realm": u"realm1"
         }
 
         with self.assertRaises(ApplicationError) as e:
@@ -226,11 +229,11 @@ class RouterWorkerSessionTests(TestCase):
             u'roles': []
         }
 
-        r.start_router_realm("realm1", realm_config)
+        r.start_router_realm(u"realm1", realm_config)
 
         component_config = {
-            "type": u"notathingcrossbarsupports",
-            "realm": u"realm1"
+            u"type": u"notathingcrossbarsupports",
+            u"realm": u"realm1"
         }
 
         with self.assertRaises(ApplicationError) as e:
@@ -256,12 +259,12 @@ class RouterWorkerSessionTests(TestCase):
             u'roles': []
         }
 
-        r.start_router_realm("realm1", realm_config)
+        r.start_router_realm(u"realm1", realm_config)
 
         component_config = {
-            "type": u"class",
-            "classname": u"crossbar.worker.test.examples.badclass.AppSession",
-            "realm": u"realm1"
+            u"type": u"class",
+            u"classname": u"crossbar.worker.test.examples.badclass.AppSession",
+            u"realm": u"realm1"
         }
 
         with self.assertRaises(ApplicationError) as e:
@@ -276,16 +279,15 @@ class RouterWorkerSessionTests(TestCase):
 
 class WebTests(TestCase):
 
-    # XXX: Treq isn't ported yet, so just tie it with the WSGI tests for now
-    skip = WSGI_TESTS
-
     def setUp(self):
-        self.cbdir = FilePath(self.mktemp())
-        self.cbdir.createDirectory()
-        config_extras = DottableDict({"node": "testnode",
-                                      "worker": "worker1",
-                                      "cbdir": self.cbdir.path})
-        self.config = ComponentConfig("realm1", extra=config_extras)
+        self.cbdir = self.mktemp()
+        os.makedirs(self.cbdir)
+        config_extras = DottableDict({"node": u"testnode",
+                                      "worker": u"worker1",
+                                      "cbdir": self.cbdir.decode('utf8')
+                                      if not isinstance(self.cbdir, six.text_type)
+                                      else self.cbdir})
+        self.config = ComponentConfig(u"realm1", extra=config_extras)
 
     def test_root_not_required(self):
         """
@@ -306,11 +308,12 @@ class WebTests(TestCase):
         }
 
         # Make a file
-        self.cbdir.child('file.txt').setContent(b"hello!")
+        with open(os.path.join(self.cbdir, 'file.txt'), "wb") as f:
+            f.write(b"hello!")
 
-        r.start_router_realm("realm1", realm_config)
+        r.start_router_realm(u"realm1", realm_config)
         r.start_router_transport(
-            "component1",
+            u"component1",
             {
                 u"type": u"web",
                 u"endpoint": {
@@ -319,13 +322,12 @@ class WebTests(TestCase):
                 },
                 u"paths": {
                     u"static": {
-                        "directory": self.cbdir.asTextMode().path,
-                        "type": u"static"
+                        u"directory": u".",
+                        u"type": u"static"
                     }
                 }
             })
 
-        # Make a request to the WSGI app.
         d1 = treq.get("http://localhost:8080/", reactor=temp_reactor)
         d1.addCallback(lambda resp: self.assertEqual(resp.code, 404))
 
@@ -337,7 +339,7 @@ class WebTests(TestCase):
         def done(results):
             for item in results:
                 if not item[0]:
-                    raise item[1]
+                    return item[1]
 
         d = defer.DeferredList([d1, d2])
         d.addCallback(done)
@@ -356,12 +358,12 @@ class WSGITests(TestCase):
     skip = WSGI_TESTS
 
     def setUp(self):
-        self.cbdir = FilePath(self.mktemp())
-        self.cbdir.createDirectory()
+        self.cbdir = self.mktemp()
+        os.makedirs(self.cbdir)
         config_extras = DottableDict({"node": "testnode",
                                       "worker": "worker1",
-                                      "cbdir": self.cbdir.path})
-        self.config = ComponentConfig("realm1", extra=config_extras)
+                                      "cbdir": self.cbdir})
+        self.config = ComponentConfig(u"realm1", extra=config_extras)
 
     def test_basic(self):
         """
@@ -380,9 +382,9 @@ class WSGITests(TestCase):
             u'roles': []
         }
 
-        r.start_router_realm("realm1", realm_config)
+        r.start_router_realm(u"realm1", realm_config)
         r.start_router_transport(
-            "component1",
+            u"component1",
             {
                 u"type": u"web",
                 u"endpoint": {
@@ -430,7 +432,7 @@ class WSGITests(TestCase):
             u'roles': []
         }
 
-        r.start_router_realm("realm1", realm_config)
+        r.start_router_realm(u"realm1", realm_config)
         r.start_router_transport(
             "component1",
             {

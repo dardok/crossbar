@@ -20,7 +20,8 @@ clean:
 	find . -name "*.db" -exec rm -f {} \;
 	find . -name "*.pyc" -exec rm -f {} \;
 	find . -name "*.log" -exec rm -f {} \;
-	find . -name "__pycache__" -type d -exec rm -rf {} \;
+	# Learn to love the shell! http://unix.stackexchange.com/a/115869/52500
+	find . \( -name "*__pycache__" -type d \) -prune -exec rm -rf {} +
 
 install:
 	pip install --upgrade -e .[all]
@@ -31,8 +32,12 @@ install3:
 publish: clean
 	python setup.py register
 	python setup.py sdist upload
+	# we can't ship wheels: while CB itself doesn't have binary extensions,
+	# we do dynamic deps ..
+	# see: https://github.com/crossbario/crossbar/issues/525
+	#python setup.py bdist_wheel upload
 
-test:
+test: flake8
 	trial crossbar
 
 full_test: clean flake8

@@ -36,7 +36,7 @@ from autobahn.wamp import auth
 from autobahn.wamp.types import SubscribeOptions, PublishOptions
 from autobahn.twisted.wamp import ApplicationSession, ApplicationRunner
 
-from crossbar._logging import make_logger
+from txaio import make_logger
 
 __all__ = ('LocalSession',)
 
@@ -64,7 +64,8 @@ class BridgeSession(ApplicationSession):
 
             def on_event(*args, **kwargs):
                 details = kwargs.pop('details')
-                self.publish(uri, *args, options=PublishOptions(disclose_me=True), **kwargs)
+                # FIXME: setup things so out (the node's) identity gets disclosed
+                self.publish(uri, *args, options=PublishOptions(), **kwargs)
                 # self.log.info("forwarded event from {} to {} - args={}, details={}\n".format(other, self, args, details))
                 self.log.info("forwarded from {} event to {} ({}): args={}, details={}\n".format(other, self, self._DIR, args, details))
 

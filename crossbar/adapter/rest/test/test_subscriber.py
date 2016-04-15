@@ -30,8 +30,6 @@
 
 from __future__ import absolute_import
 
-from six import PY3
-
 from twisted.web.http_headers import Headers
 from twisted.internet.defer import inlineCallbacks
 
@@ -39,25 +37,25 @@ from autobahn.wamp.types import ComponentConfig, PublishOptions
 
 from crossbar.test import TestCase
 from crossbar.adapter.rest.test import MockTransport, MockWebTransport
-if not PY3:
-    from crossbar.adapter.rest import MessageForwarder
+from crossbar.adapter.rest import MessageForwarder
 
 
 class MessageForwarderTestCase(TestCase):
-
-    if PY3:
-        skip = "Not ported to Py3"
 
     @inlineCallbacks
     def test_basic_web(self):
         """
         Plain request, no params.
         """
-        config = ComponentConfig(realm="realm1",
-                                 extra={"subscriptions": [
-                                     {"url": "https://foo.com/msg",
-                                      "topic": "io.crossbar.forward1"}
-                                 ]})
+        extra = {
+            u"subscriptions": [
+                {
+                    u"url": u"https://foo.com/msg",
+                    u"topic": u"io.crossbar.forward1"
+                }
+            ]
+        }
+        config = ComponentConfig(realm=u"realm1", extra=extra)
 
         m = MockWebTransport(self)
         m._addResponse(200, "whee")
@@ -69,8 +67,8 @@ class MessageForwarderTestCase(TestCase):
                               options=PublishOptions(acknowledge=True))
 
         self.assertNotEqual(res.id, None)
-        self.assertEqual(m.maderequest["args"], ("POST", "https://foo.com/msg"))
+        self.assertEqual(m.maderequest["args"], (b"POST", b"https://foo.com/msg"))
         self.assertEqual(m.maderequest["kwargs"], {
-            "data": '{"args":["hi"],"kwargs":{}}',
-            "headers": Headers({"Content-Type": ["application/json"]})
+            "data": b'{"args":["hi"],"kwargs":{}}',
+            "headers": Headers({b"Content-Type": [b"application/json"]})
         })
