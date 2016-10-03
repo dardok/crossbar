@@ -358,8 +358,17 @@ def check_dict_args(spec, config, msg):
             valid_type = False
             for t in spec[k][1]:
                 if isinstance(config[k], t):
-                    valid_type = True
-                    break
+                    # We're special-casing Sequence here, because in
+                    # general if we say a Sequence is okay, we do NOT
+                    # want strings to be allowed but Python says that
+                    # "isinstance('foo', Sequence) == True"
+                    if t is Sequence:
+                        if not isinstance(config[k], (six.text_type, str)):
+                            valid_type = True
+                            break
+                    else:
+                        valid_type = True
+                        break
             if not valid_type:
                 raise InvalidConfigException("{} - invalid type {} encountered for attribute '{}', must be one of ({})".format(msg, type(config[k]).__name__, k, ', '.join([x.__name__ for x in spec[k][1]])))
 
@@ -2093,7 +2102,7 @@ def check_container_components(components):
         raise InvalidConfigException("'components' items must be lists ({} encountered)".format(type(components)))
 
     for i, component in enumerate(components):
-        log.debug("Checking container component item {} ..".format(i))
+        log.debug("Checking container component item {item} ..", item=i)
         check_container_component(component)
 
 
@@ -2192,7 +2201,7 @@ def check_router_components(components):
         raise InvalidConfigException("'components' items must be lists ({} encountered)".format(type(components)))
 
     for i, component in enumerate(components):
-        log.debug("Checking router component item {} ..".format(i))
+        log.debug("Checking router component item {item} ..", item=i)
         check_router_component(component)
 
 
@@ -2243,7 +2252,7 @@ def check_connections(connections):
         raise InvalidConfigException("'connections' items must be lists ({} encountered)".format(type(connections)))
 
     for i, connection in enumerate(connections):
-        log.debug("Checking connection item {} ..".format(i))
+        log.debug("Checking connection item {item} ..", item=i)
         check_connection(connection)
 
 
@@ -2282,7 +2291,7 @@ def check_router(router):
         raise InvalidConfigException("'realms' items must be lists ({} encountered)\n\n{}".format(type(realms), pformat(router)))
 
     for i, realm in enumerate(realms):
-        log.debug("Checking realm item {} ..".format(i))
+        log.debug("Checking realm item {item} ..", item=i)
         check_router_realm(realm)
 
     # transports
@@ -2292,7 +2301,7 @@ def check_router(router):
         raise InvalidConfigException("'transports' items must be lists ({} encountered)\n\n{}".format(type(transports), pformat(router)))
 
     for i, transport in enumerate(transports):
-        log.debug("Checking transport item {} ..".format(i))
+        log.debug("Checking transport item {item} ..", item=i)
         check_router_transport(transport)
 
     # connections
@@ -2697,9 +2706,6 @@ def check_cdc(config):
         raise InvalidConfigException("'config' item with CDC configuration must of type dictionary ({} encountered)\n\n{}".format(type(config), pformat(config)))
 
     check_dict_args({
-        'enabled': (True, [bool]),
-        'secret': (False, [six.text_type]),
-        'realm': (False, [six.text_type]),
         'transport': (False, [Mapping]),
     }, config, "invalid 'cdc' configuration")
 
@@ -2751,7 +2757,7 @@ def check_config(config):
         raise InvalidConfigException("'workers' attribute in top-level configuration must be a list ({} encountered)".format(type(workers)))
 
     for i, worker in enumerate(workers):
-        log.debug("Checking worker item {} ..".format(i))
+        log.debug("Checking worker item {item} ..", item=i)
         check_worker(worker)
 
 
@@ -2800,7 +2806,7 @@ def convert_config_file(configfile):
 
     with open(configfile, 'r') as infile:
         if configext == '.yaml':
-            log.info("converting YAML configuration {} to JSON ...".format(configfile))
+            log.info("converting YAML configuration {cfg} to JSON ...", cfg=configfile)
             try:
                 config = yaml.safe_load(infile)
             except Exception as e:
@@ -2809,9 +2815,9 @@ def convert_config_file(configfile):
                 newconfig = os.path.abspath(configbase + '.json')
                 with open(newconfig, 'w') as outfile:
                     json.dump(config, outfile, ensure_ascii=False, separators=(',', ': '), indent=3, sort_keys=True)
-                    log.info("ok, JSON formatted configuration written to {}".format(newconfig))
+                    log.info("ok, JSON formatted configuration written to {cfg}", cfg=newconfig)
         elif configext == ".json":
-            log.info("converting JSON formatted configuration {} to YAML format ...".format(configfile))
+            log.info("converting JSON formatted configuration {cfg} to YAML format ...", cfg=configfile)
             try:
                 config = json.load(infile, object_pairs_hook=OrderedDict)
             except ValueError as e:
@@ -2820,7 +2826,7 @@ def convert_config_file(configfile):
                 newconfig = os.path.abspath(configbase + '.yaml')
                 with open(newconfig, 'w') as outfile:
                     yaml.safe_dump(config, outfile, default_flow_style=False)
-                    log.info("ok, YAML formatted configuration written to {}".format(newconfig))
+                    log.info("ok, YAML formatted configuration written to {cfg}", cfg=newconfig)
 
         else:
             raise InvalidConfigException("configuration file needs to be '.json' or '.yaml'.")

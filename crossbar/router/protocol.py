@@ -176,11 +176,14 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
             from twisted.internet import reactor
 
             def print_traffic():
-                self.log.info("Traffic {}: {} / {} in / out bytes - {} / {} in / out msgs".format(self.peer,
-                                                                                                  self.trafficStats.incomingOctetsWireLevel,
-                                                                                                  self.trafficStats.outgoingOctetsWireLevel,
-                                                                                                  self.trafficStats.incomingWebSocketMessages,
-                                                                                                  self.trafficStats.outgoingWebSocketMessages))
+                self.log.info(
+                    "Traffic {peer}: {wire_in} / {wire_out} in / out bytes - {ws_in} / {ws_out} in / out msgs",
+                    peer=self.peer,
+                    wire_in=self.trafficStats.incomingOctetsWireLevel,
+                    wire_out=self.trafficStats.outgoingOctetsWireLevel,
+                    ws_in=self.trafficStats.incomingWebSocketMessages,
+                    ws_out=self.trafficStats.outgoingWebSocketMessages,
+                )
                 reactor.callLater(1, print_traffic)
 
             print_traffic()
@@ -228,7 +231,7 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
                 # associated with the same cookie
                 self.factory._cookiestore.addProto(self._cbtid, self)
 
-                self.log.debug("Cookie tracking enabled on WebSocket connection {}".format(self))
+                self.log.debug("Cookie tracking enabled on WebSocket connection {ws}", ws=self)
 
                 # if cookie-based authentication is enabled, set auth info from cookie store
                 #
@@ -248,7 +251,7 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
                 else:
                     self.log.debug("Cookie-based authentication disabled")
             else:
-                self.log.debug("Cookie tracking disabled on WebSocket connection {}".format(self))
+                self.log.debug("Cookie tracking disabled on WebSocket connection {ws}", ws=self)
 
             # remember transport level info for later forwarding in
             # WAMP meta event "wamp.session.on_join"
@@ -333,7 +336,7 @@ class WampWebSocketServerFactory(websocket.WampWebSocketServerFactory):
             serializers = []
             sers = set(config['serializers'])
 
-            if 'cbor' in sers:
+            if u'cbor' in sers:
                 # try CBOR WAMP serializer
                 try:
                     from autobahn.wamp.serializer import CBORSerializer
@@ -342,9 +345,9 @@ class WampWebSocketServerFactory(websocket.WampWebSocketServerFactory):
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-CBOR serializer")
                 else:
-                    sers.discard('cbor')
+                    sers.discard(u'cbor')
 
-            if 'msgpack' in sers:
+            if u'msgpack' in sers:
                 # try MsgPack WAMP serializer
                 try:
                     from autobahn.wamp.serializer import MsgPackSerializer
@@ -355,7 +358,7 @@ class WampWebSocketServerFactory(websocket.WampWebSocketServerFactory):
                 else:
                     sers.discard('msgpack')
 
-            if 'ubjson' in sers:
+            if u'ubjson' in sers:
                 # try UBJSON WAMP serializer
                 try:
                     from autobahn.wamp.serializer import UBJSONSerializer
@@ -364,9 +367,9 @@ class WampWebSocketServerFactory(websocket.WampWebSocketServerFactory):
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-UBJSON serializer")
                 else:
-                    sers.discard('ubjson')
+                    sers.discard(u'ubjson')
 
-            if 'json' in sers:
+            if u'json' in sers:
                 # try JSON WAMP serializer
                 try:
                     from autobahn.wamp.serializer import JsonSerializer
@@ -375,7 +378,7 @@ class WampWebSocketServerFactory(websocket.WampWebSocketServerFactory):
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-JSON serializer")
                 else:
-                    sers.discard('json')
+                    sers.discard(u'json')
 
             if not serializers:
                 raise Exception("no valid WAMP serializers specified")
@@ -493,7 +496,7 @@ class WampRawSocketServerFactory(rawsocket.WampRawSocketServerFactory):
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-CBOR serializer")
                 else:
-                    sers.discard('cbor')
+                    sers.discard(u'cbor')
 
             if u'msgpack' in sers:
                 # try MsgPack WAMP serializer
@@ -505,7 +508,18 @@ class WampRawSocketServerFactory(rawsocket.WampRawSocketServerFactory):
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-MsgPack serializer")
                 else:
-                    sers.discard('msgpack')
+                    sers.discard(u'msgpack')
+
+            if u'ubjson' in sers:
+                # try UBJSON WAMP serializer
+                try:
+                    from autobahn.wamp.serializer import UBJSONSerializer
+                    serializers.append(UBJSONSerializer(batched=True))
+                    serializers.append(UBJSONSerializer())
+                except ImportError:
+                    self.log.warn("Warning: could not load WAMP-UBJSON serializer")
+                else:
+                    sers.discard(u'ubjson')
 
             if u'json' in sers:
                 # try JSON WAMP serializer
@@ -515,7 +529,7 @@ class WampRawSocketServerFactory(rawsocket.WampRawSocketServerFactory):
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-JSON serializer")
                 else:
-                    sers.discard('json')
+                    sers.discard(u'json')
 
             if not serializers:
                 raise Exception("no valid WAMP serializers specified")

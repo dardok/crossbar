@@ -415,7 +415,9 @@ class RouterSession(BaseSession):
                     msg = None
                     if isinstance(res, types.Accept):
                         custom = {
-                            u'x_cb_node_id': self._router_factory._node_id
+                            # FIXME:
+                            # u'x_cb_node_id': self._router_factory._node_id
+                            u'x_cb_node_id': None
                         }
                         welcome(res.realm, res.authid, res.authrole, res.authmethod, res.authprovider, res.authextra, custom)
 
@@ -441,7 +443,9 @@ class RouterSession(BaseSession):
                     msg = None
                     if isinstance(res, types.Accept):
                         custom = {
-                            u'x_cb_node_id': self._router_factory._node_id
+                            # FIXME:
+                            # u'x_cb_node_id': self._router_factory._node_id
+                            u'x_cb_node_id': None
                         }
                         welcome(res.realm, res.authid, res.authrole, res.authmethod, res.authprovider, res.authextra, custom)
 
@@ -467,7 +471,10 @@ class RouterSession(BaseSession):
                 # self._transport.close()
 
             else:
-                raise ProtocolError(u"Received {0} message, and session is not yet established".format(msg.__class__))
+                # raise ProtocolError(u"PReceived {0} message while session is not joined".format(msg.__class__))
+                # self.log.warn('Protocol state error - received {message} while session is not joined')
+                # swallow all noise like still getting PUBLISH messages from log event forwarding - maybe FIXME
+                pass
 
         else:
 
@@ -490,7 +497,7 @@ class RouterSession(BaseSession):
                 try:
                     self._router.detach(self)
                 except Exception:
-                    pass
+                    self.log.failure("Internal error")
 
                 # In order to send wamp.session.on_leave properly
                 # (i.e. *with* the proper session_id) we save it
@@ -696,7 +703,7 @@ class RouterSession(BaseSession):
                     return types.Deny(ApplicationError.NO_AUTH_METHOD, message=u'cannot authenticate using any of the offered authmethods {}'.format(authmethods))
 
         except Exception as e:
-            self.log.critical("Internal error: {}".format(e))
+            self.log.critical("Internal error: {msg}", msg=str(e))
             return types.Deny(message=u'internal error: {}'.format(e))
 
     def onAuthenticate(self, signature, extra):
