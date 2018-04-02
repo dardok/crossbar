@@ -123,13 +123,6 @@ You can check like this:
 
     openssl ecparam -list_curves
 
-To install pyOpenSSL trunk (since 0.15 isn't released yet - 2014/07/09):
-
-    cd ~
-    git clone git@github.com:pyca/pyopenssl.git
-    cd pyopenssl
-    python setup.py install
-
 Crossbar.io uses the `prime256v1` curve by default.
 
 `prime256v1`(X9.62/SECG) is an elliptic curve over a 256 bit prime field. This is elliptic curve "NIST P-256" from [here](http://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.186-4.pdf).
@@ -164,7 +157,7 @@ We provide help for creation and handling of TLS certificates on the [TLS Certif
 * [Sample configuration](https://github.com/crossbario/crossbarexamples/tree/master/encryption/tls)
 * [Python example for using TLS with Crossbar.io](https://github.com/crossbario/crossbarexamples/tree/master/wss/python)
 * [TLS Client Cert Authentication examples](https://github.com/crossbario/crossbarexamples/tree/master/authentication/tls)
-* [Crossbar.io demo instance production configuration](https://github.com/crossbario/crossbarexamples/blob/master/demos/_demo_launcher/.crossbar/config_prod_cdc.json) - an example of recommended strongly secure settings
+* [Crossbar.io demo instance production configuration](https://github.com/crossbario/crossbarexamples/blob/master/demos/_demo_launcher/.crossbar/config.json) - an example of recommended strongly secure settings
 
 
 

@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -50,7 +50,7 @@ from autobahn.wamp.types import SessionDetails
 from autobahn.wamp.interfaces import ITransportHandler
 
 from crossbar.twisted.endpoint import extract_peer_certificate
-from crossbar.router.auth import PendingAuthWampCra, PendingAuthTicket
+from crossbar.router.auth import PendingAuthWampCra, PendingAuthTicket, PendingAuthScram
 from crossbar.router.auth import AUTHMETHODS, AUTHMETHOD_MAP
 
 from twisted.internet.defer import inlineCallbacks
@@ -289,15 +289,17 @@ class RouterSession(BaseSession):
         """
         Constructor.
         """
-        BaseSession.__init__(self)
+        super(RouterSession, self).__init__()
         self._transport = None
 
         self._router_factory = router_factory
         self._router = None
         self._realm = None
+        self._testaments = {u"destroyed": [], u"detatched": []}
 
         self._goodbye_sent = False
         self._transport_is_closing = False
+        self._session_details = None
 
     def onOpen(self, transport):
         """
@@ -380,6 +382,7 @@ class RouterSession(BaseSession):
                 self._authrole = authrole
                 self._authmethod = authmethod
                 self._authprovider = authprovider
+                self._authextra = authextra
 
                 roles = self._router.attach(self)
 
@@ -415,9 +418,7 @@ class RouterSession(BaseSession):
                     msg = None
                     if isinstance(res, types.Accept):
                         custom = {
-                            # FIXME:
-                            # u'x_cb_node_id': self._router_factory._node_id
-                            u'x_cb_node_id': None
+                            u'x_cb_node_id': self._router_factory._node_id
                         }
                         welcome(res.realm, res.authid, res.authrole, res.authmethod, res.authprovider, res.authextra, custom)
 
@@ -443,9 +444,7 @@ class RouterSession(BaseSession):
                     msg = None
                     if isinstance(res, types.Accept):
                         custom = {
-                            # FIXME:
-                            # u'x_cb_node_id': self._router_factory._node_id
-                            u'x_cb_node_id': None
+                            u'x_cb_node_id': self._router_factory._node_id
                         }
                         welcome(res.realm, res.authid, res.authrole, res.authmethod, res.authprovider, res.authextra, custom)
 
@@ -531,7 +530,6 @@ class RouterSession(BaseSession):
                 # self._transport.close()
 
             else:
-
                 self._router.process(self, msg)
 
     # noinspection PyUnusedLocal
@@ -551,8 +549,11 @@ class RouterSession(BaseSession):
 
             try:
                 self._router.detach(self)
-            except Exception:
-                pass
+            except Exception as e:
+                self.log.error(
+                    "Failed to detach session '{}': {}".format(self._session_id, e)
+                )
+                self.log.debug("{tb}".format(tb=Failure().getTraceback()))
 
             self._session_id = None
 
@@ -607,10 +608,15 @@ class RouterSession(BaseSession):
         try:
             # default authentication method is "WAMP-Anonymous" if client doesn't specify otherwise
             authmethods = details.authmethods or [u'anonymous']
+            authextra = details.authextra
+
+            self.log.debug('onHello: {methods} {authextra}', authextra=authextra, methods=authmethods)
 
             # if the client had a reassigned realm during authentication, restore it from the cookie
             if hasattr(self._transport, '_authrealm') and self._transport._authrealm:
+                assert u'cookie' in authmethods
                 realm = self._transport._authrealm
+                authextra = self._transport._authextra
 
             # perform authentication
             if self._transport._authid is not None and (self._transport._authmethod == u'trusted' or self._transport._authprovider in authmethods):
@@ -626,7 +632,7 @@ class RouterSession(BaseSession):
                                         authrole=self._transport._authrole,
                                         authmethod=self._transport._authmethod,
                                         authprovider=self._transport._authprovider,
-                                        authextra=None)
+                                        authextra=authextra)
                 else:
                     return types.Deny(ApplicationError.NO_SUCH_ROLE, message="session was previously authenticated (via transport), but role '{}' no longer exists on realm '{}'".format(self._transport._authrole, realm))
 
@@ -640,6 +646,8 @@ class RouterSession(BaseSession):
                     if u'anonymous' not in authmethods:
                         return types.Deny(ApplicationError.NO_AUTH_METHOD, message=u'cannot authenticate using any of the offered authmethods {}'.format(authmethods))
 
+                    authmethod = u'anonymous'
+
                     if not realm:
                         return types.Deny(ApplicationError.NO_SUCH_REALM, message=u'no realm requested')
 
@@ -648,19 +656,16 @@ class RouterSession(BaseSession):
 
                     # we ignore any details.authid the client might have announced, and use
                     # a cookie value or a random value
-                    if self._transport._cbtid:
+                    if hasattr(self._transport, "_cbtid") and self._transport._cbtid:
                         # if cookie tracking is enabled, set authid to cookie value
                         authid = self._transport._cbtid
                     else:
                         # if no cookie tracking, generate a random value for authid
                         authid = util.generate_serial_number()
 
-                    return types.Accept(realm=realm,
-                                        authid=authid,
-                                        authrole=u'anonymous',
-                                        authmethod=u'anonymous',
-                                        authprovider=u'static',
-                                        authextra=None)
+                    PendingAuthKlass = AUTHMETHOD_MAP[authmethod]
+                    self._pending_auth = PendingAuthKlass(self, {u'type': u'static', u'authrole': u'anonymous', u'authid': authid})
+                    return self._pending_auth.hello(realm, details)
 
                 else:
                     # iterate over authentication methods announced by client ..
@@ -668,6 +673,7 @@ class RouterSession(BaseSession):
 
                         # invalid authmethod
                         if authmethod not in AUTHMETHODS:
+                            self.log.debug("Unknown authmethod: {}".format(authmethod))
                             return types.Deny(message=u'invalid authmethod "{}"'.format(authmethod))
 
                         # authmethod not configured
@@ -681,7 +687,12 @@ class RouterSession(BaseSession):
                             continue
 
                         # WAMP-Anonymous, WAMP-Ticket, WAMP-CRA, WAMP-TLS, WAMP-Cryptosign
-                        if authmethod in [u'anonymous', u'ticket', u'wampcra', u'tls', u'cryptosign']:
+                        # WAMP-SCRAM
+                        pending_auth_methods = [
+                            u'anonymous', u'ticket', u'wampcra', u'tls',
+                            u'cryptosign', u'scram',
+                        ]
+                        if authmethod in pending_auth_methods:
                             PendingAuthKlass = AUTHMETHOD_MAP[authmethod]
                             self._pending_auth = PendingAuthKlass(self, auth_config[authmethod])
                             return self._pending_auth.hello(realm, details)
@@ -703,7 +714,8 @@ class RouterSession(BaseSession):
                     return types.Deny(ApplicationError.NO_AUTH_METHOD, message=u'cannot authenticate using any of the offered authmethods {}'.format(authmethods))
 
         except Exception as e:
-            self.log.critical("Internal error: {msg}", msg=str(e))
+            self.log.failure('internal error: {log_failure.value}')
+            self.log.critical("internal error: {msg}", msg=str(e))
             return types.Deny(message=u'internal error: {}'.format(e))
 
     def onAuthenticate(self, signature, extra):
@@ -719,7 +731,8 @@ class RouterSession(BaseSession):
             # WAMP-Ticket, WAMP-CRA, WAMP-Cryptosign
             if isinstance(self._pending_auth, PendingAuthTicket) or \
                isinstance(self._pending_auth, PendingAuthWampCra) or \
-               isinstance(self._pending_auth, PendingAuthCryptosign):
+               isinstance(self._pending_auth, PendingAuthCryptosign) or \
+               isinstance(self._pending_auth, PendingAuthScram):
                 return self._pending_auth.authenticate(signature)
 
             # should not arrive here: logic error
@@ -735,7 +748,7 @@ class RouterSession(BaseSession):
 
         if hasattr(self._transport, '_cbtid') and self._transport._cbtid:
             if details.authmethod != 'cookie':
-                self._transport.factory._cookiestore.setAuth(self._transport._cbtid, details.authid, details.authrole, details.authmethod, self._realm)
+                self._transport.factory._cookiestore.setAuth(self._transport._cbtid, details.authid, details.authrole, details.authmethod, details.authextra, self._realm)
 
         # Router/Realm service session
         #
@@ -750,16 +763,37 @@ class RouterSession(BaseSession):
             u'authid': details.authid,
             u'authrole': details.authrole,
             u'authmethod': details.authmethod,
+            u'authextra': details.authextra,
             u'authprovider': details.authprovider,
             u'transport': self._transport._transport_info
         }
+        self._router._session_joined(self, self._session_details)
 
         # dispatch session metaevent from WAMP AP
         #
         if self._service_session:
             self._service_session.publish(u'wamp.session.on_join', self._session_details)
 
+    def onWelcome(self, msg):
+        # this is a hook for authentication methods to deny the
+        # session after the Welcome message -- do we need to do
+        # anything in this impl?
+        pass
+
     def onLeave(self, details):
+
+        # _router can be None when, e.g., authentication fails hard
+        # (e.g. the client aborts the connection during auth challenge
+        # because they hit a syntax error)
+        if self._router is not None:
+            # todo: move me into detatch when session resumption happens
+            for msg in self._testaments[u"detatched"]:
+                self._router.process(self, msg)
+
+            for msg in self._testaments[u"destroyed"]:
+                self._router.process(self, msg)
+
+            self._router._session_left(self, self._session_details)
 
         # dispatch session metaevent from WAMP AP
         #
@@ -780,7 +814,7 @@ class RouterSession(BaseSession):
                 cs = self._transport.factory._cookiestore
 
                 # set cookie to "not authenticated"
-                cs.setAuth(self._transport._cbtid, None, None, None, None)
+                cs.setAuth(self._transport._cbtid, None, None, None, None, None)
 
                 # kick all session for the same auth cookie
                 for proto in cs.getProtos(self._transport._cbtid):

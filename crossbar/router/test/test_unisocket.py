@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -110,8 +110,8 @@ class UniSocketTests(TestCase):
 
     def test_invalid_status_line(self):
         """
-        Not speaking RawSocket but also not speaking a type of HTTP will cause
-        the connection to be dropped.
+        Not speaking RawSocket or MQTT but also not speaking a type of HTTP
+        will cause the connection to be dropped.
         """
         t = StringTransport()
 
@@ -185,7 +185,7 @@ class UniSocketTests(TestCase):
 
     def test_websocket_with_no_map(self):
         """
-        A web request that matches no WebSocket
+        A web request that matches no WebSocket path will go to HTTP/1.1.
         """
         t = StringTransport()
 
@@ -202,3 +202,52 @@ class UniSocketTests(TestCase):
 
         self.assertFalse(t.connected)
         self.assertEqual(t.value(), b"")
+
+    def test_mqtt_with_no_factory(self):
+        """
+        Trying to speak MQTT with no MQTT factory configured will
+        drop the connection.
+        """
+        t = StringTransport()
+
+        f = UniSocketServerFactory()
+        p = f.buildProtocol(None)
+
+        p.makeConnection(t)
+        t.protocol = p
+
+        self.assertTrue(t.connected)
+        p.dataReceived(b'\x100000000')
+
+        self.assertFalse(t.connected)
+
+    def test_mqtt_with_factory(self):
+        """
+        Speaking MQTT when the connection is made will make UniSocket
+        create a new MQTT protocol and send the data to it.
+        """
+        t = StringTransport()
+
+        class MyFakeMQTT(Protocol):
+            """
+            A fake MQTT factory which just echos data back.
+            """
+            def connectionMade(self, *a):
+                pass
+
+            def dataReceived(self, data):
+                self.transport.write(data)
+
+        fake_mqtt = Factory.forProtocol(MyFakeMQTT)
+        f = UniSocketServerFactory(mqtt_factory=fake_mqtt)
+        p = f.buildProtocol(None)
+
+        p.makeConnection(t)
+        t.protocol = p
+
+        self.assertTrue(t.connected)
+        p.dataReceived(b'\x100000000')
+        p.dataReceived(b'moredata')
+
+        self.assertTrue(t.connected)
+        self.assertEqual(t.value(), b'\x100000000moredata')

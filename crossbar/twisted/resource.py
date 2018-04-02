@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -37,7 +37,6 @@ from twisted.web import http, server
 from twisted.web.http import NOT_FOUND
 from twisted.web.resource import Resource, NoResource
 from twisted.web.static import File
-from twisted.web.proxy import ReverseProxyResource  # noqa (Republish resource)
 from twisted.python.filepath import FilePath
 
 from txaio import make_logger
@@ -54,6 +53,18 @@ try:
 except (ImportError, SyntaxError):
     # Twisted hasn't ported this to Python 3 yet
     _HAS_CGI = False
+
+
+def set_cross_origin_headers(request):
+    origin = request.getHeader(b'origin')
+    if origin is None or origin == b'null':
+        origin = b'*'
+    request.setHeader(b'access-control-allow-origin', origin)
+    request.setHeader(b'access-control-allow-credentials', b'true')
+
+    headers = request.getHeader(b'access-control-request-headers')
+    if headers is not None:
+        request.setHeader(b'access-control-allow-headers', headers)
 
 
 class JsonResource(Resource):
@@ -92,15 +103,7 @@ class JsonResource(Resource):
         # set response headers for cross-origin requests
         #
         if self._allow_cross_origin:
-            origin = request.getHeader(b'origin')
-            if origin is None or origin == b'null':
-                origin = b'*'
-            request.setHeader(b'access-control-allow-origin', origin)
-            request.setHeader(b'access-control-allow-credentials', b'true')
-
-            headers = request.getHeader(b'access-control-request-headers')
-            if headers is not None:
-                request.setHeader(b'access-control-allow-headers', headers)
+            set_cross_origin_headers(request)
 
         # set response headers to disallow caching
         #
@@ -115,7 +118,6 @@ class JsonResource(Resource):
 
 
 class Resource404(Resource):
-
     """
     Custom error page (404).
     """
@@ -147,6 +149,41 @@ class Resource404(Resource):
         return b''
 
 
+class NodeInfoResource(Resource):
+    """
+    Node information page.
+    """
+
+    isLeaf = True
+
+    def __init__(self, templates, controller_session):
+        Resource.__init__(self)
+        self._page = templates.get_template('cb_node_info.html')
+        self._pid = u'{}'.format(os.getpid())
+        self._controller_session = controller_session
+
+    def _delayedRender(self, node_info, request):
+        try:
+            peer = request.transport.getPeer()
+            peer = u'{}:{}'.format(peer.host, peer.port)
+        except:
+            peer = u'?:?'
+
+        s = self._page.render(cbVersion=crossbar.__version__,
+                              workerPid=self._pid,
+                              peer=peer,
+                              **node_info)
+
+        request.write(s.encode('utf8'))
+        request.finish()
+
+    def render_GET(self, request):
+        # http://twistedmatrix.com/documents/current/web/howto/web-in-60/asynchronous-deferred.html
+        d = self._controller_session.call(u'crossbar.get_status')
+        d.addCallback(self._delayedRender, request)
+        return server.NOT_DONE_YET
+
+
 class RedirectResource(Resource):
 
     isLeaf = True
@@ -168,12 +205,18 @@ class StaticResource(File):
 
     def __init__(self, *args, **kwargs):
         self._cache_timeout = kwargs.pop('cache_timeout', None)
+        self._allow_cross_origin = kwargs.pop('allow_cross_origin', True)
         File.__init__(self, *args, **kwargs)
 
     def render_GET(self, request):
         if self._cache_timeout is not None:
             request.setHeader(b'cache-control', u'max-age={}, public'.format(self._cache_timeout).encode('utf8'))
             request.setHeader(b'expires', http.datetimeToString(time.time() + self._cache_timeout))
+
+        # set response headers for cross-origin requests
+        #
+        if self._allow_cross_origin:
+            set_cross_origin_headers(request)
 
         return File.render_GET(self, request)
 

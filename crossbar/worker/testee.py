@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -30,13 +30,13 @@
 
 from __future__ import absolute_import
 
-from twisted.internet.defer import inlineCallbacks, DeferredList
+from twisted.internet.defer import inlineCallbacks
 from twisted.internet import protocol
 
 from autobahn.twisted.websocket import WebSocketServerFactory, \
     WebSocketServerProtocol
-from autobahn.wamp.types import RegisterOptions
 from autobahn.wamp.exception import ApplicationError
+from autobahn import wamp
 
 from txaio import make_logger
 
@@ -143,6 +143,7 @@ class WebSocketTesteeWorkerSession(NativeWorkerSession):
     A native Crossbar.io worker that runs a WebSocket testee.
     """
     WORKER_TYPE = 'websocket-testee'
+    WORKER_TITLE = u'WebSocket Testee'
 
     @inlineCallbacks
     def onJoin(self, details):
@@ -151,31 +152,16 @@ class WebSocketTesteeWorkerSession(NativeWorkerSession):
         """
         yield NativeWorkerSession.onJoin(self, details, publish_ready=False)
 
-        # the procedures registered
-        procs = [
-            'get_websocket_testee_transport',
-            'start_websocket_testee_transport',
-            'stop_websocket_testee_transport',
-        ]
-
-        dl = []
-        for proc in procs:
-            uri = '{}.{}'.format(self._uri_prefix, proc)
-            self.log.info("Registering management API procedure {proc}", proc=uri)
-            dl.append(self.register(getattr(self, proc), uri, options=RegisterOptions(details_arg='details')))
-
-        regs = yield DeferredList(dl)
-
-        self.log.debug("Registered {cnt} management API procedures", cnt=len(regs))
-
         # NativeWorkerSession.publish_ready()
         yield self.publish_ready()
 
+    @wamp.register(None)
     def get_websocket_testee_transport(self, details=None):
         """
         """
         self.log.debug("{name}.get_websocket_testee_transport", name=self.__class__.__name__)
 
+    @wamp.register(None)
     def start_websocket_testee_transport(self, id, config, details=None):
         """
         """
@@ -234,6 +220,7 @@ class WebSocketTesteeWorkerSession(NativeWorkerSession):
         d.addCallbacks(ok, fail)
         return d
 
+    @wamp.register(None)
     def stop_websocket_testee_transport(self, id, details=None):
         """
         """

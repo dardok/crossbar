@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -30,6 +30,9 @@
 
 from __future__ import absolute_import, print_function
 
+import argparse
+import importlib
+
 import six
 
 from twisted.internet.error import ReactorNotRunning
@@ -37,33 +40,9 @@ from twisted.internet.error import ReactorNotRunning
 __all__ = ('run',)
 
 
-def run():
-    """
-    Entry point into (native) worker processes. This wires up stuff such that
-    a worker instance is talking WAMP-over-stdio to the node controller.
-    """
-    import os
-    import sys
-    import platform
-    import signal
-
-    # Ignore SIGINT so we get consistent behavior on control-C versus
-    # sending SIGINT to the controller process. When the controller is
-    # shutting down, it sends TERM to all its children but ctrl-C
-    # handling will send a SIGINT to all the processes in the group
-    # (so then the controller sends a TERM but the child already or
-    # will very shortly get a SIGINT as well). Twisted installs signal
-    # handlers, but not for SIGINT if there's already a custom one
-    # present.
-
-    def ignore(sig, frame):
-        log.debug("Ignoring SIGINT in worker.")
-    signal.signal(signal.SIGINT, ignore)
-
-    # create the top-level parser
-    #
-    import argparse
-    parser = argparse.ArgumentParser()
+def get_argument_parser(parser=None):
+    if not parser:
+        parser = argparse.ArgumentParser()
 
     parser.add_argument('--reactor',
                         default=None,
@@ -85,10 +64,15 @@ def run():
                         type=six.text_type,
                         help='Crossbar.io node (management) realm (required).')
 
-    parser.add_argument('-t',
-                        '--type',
-                        choices=['router', 'container', 'websocket-testee'],
-                        help='Worker type (required).')
+    parser.add_argument('-k',
+                        '--klass',
+                        type=six.text_type,
+                        help='Crossbar.io worker class (required).')
+
+    parser.add_argument('-n',
+                        '--node',
+                        type=six.text_type,
+                        help='Crossbar.io node ID (required).')
 
     parser.add_argument('-w',
                         '--worker',
@@ -100,13 +84,40 @@ def run():
                         default=None,
                         help='Worker process title to set (optional).')
 
-    options = parser.parse_args()
+    parser.add_argument('--expose_controller',
+                        type=bool,
+                        default=False,
+                        help='Expose node controller session to all components (this feature requires Crossbar.io Fabric extension).')
+
+    parser.add_argument('--expose_shared',
+                        type=bool,
+                        default=False,
+                        help='Expose a shared object to all components (this feature requires Crossbar.io Fabric extension).')
+
+    parser.add_argument('--shutdown',
+                        type=six.text_type,
+                        default=None,
+                        help='Shutdown method')
+
+    return parser
+
+
+def run(options, reactor=None):
+    """
+    Entry point into (native) worker processes. This wires up stuff such that
+    a worker instance is talking WAMP-over-stdio to the node controller.
+    """
+    import os
+    import sys
+    import platform
+    import signal
 
     # make sure logging to something else than stdio is setup _first_
     #
     from crossbar._logging import make_JSON_observer, cb_logging_aware
     from txaio import make_logger, start_logging
     from twisted.logger import globalLogPublisher
+    from twisted.python.reflect import qual
 
     log = make_logger()
 
@@ -117,6 +128,21 @@ def run():
 
     flo = make_JSON_observer(sys.__stderr__)
     globalLogPublisher.addObserver(flo)
+
+    # Ignore SIGINT so we get consistent behavior on control-C versus
+    # sending SIGINT to the controller process. When the controller is
+    # shutting down, it sends TERM to all its children but ctrl-C
+    # handling will send a SIGINT to all the processes in the group
+    # (so then the controller sends a TERM but the child already or
+    # will very shortly get a SIGINT as well). Twisted installs signal
+    # handlers, but not for SIGINT if there's already a custom one
+    # present.
+
+    def ignore(sig, frame):
+        log.debug("Ignoring SIGINT in worker.")
+    signal.signal(signal.SIGINT, ignore)
+
+    # actually begin logging
     start_logging(None, options.loglevel)
 
     # we use an Autobahn utility to import the "best" available Twisted reactor
@@ -128,10 +154,24 @@ def run():
     else:
         reactor = install_reactor(options.reactor)
 
-    from twisted.python.reflect import qual
-    log.info("Worker process starting ({python}-{reactor}) ..",
-             python=platform.python_implementation(),
-             reactor=qual(reactor.__class__).split('.')[-1])
+    # eg: crossbar.worker.container.ContainerWorkerSession
+    l = options.klass.split('.')
+    worker_module, worker_klass = '.'.join(l[:-1]), l[-1]
+
+    # now load the worker module and class
+    _mod = importlib.import_module(worker_module)
+    klass = getattr(_mod, worker_klass)
+
+    log.info(
+        'Started {worker_title} worker "{worker_id}" on node "{node_id}" [{klass} / {python}-{reactor}]',
+        worker_title=klass.WORKER_TITLE,
+        klass=options.klass,
+        node_id=options.node,
+        worker_id=options.worker,
+        pid=os.getpid(),
+        python=platform.python_implementation(),
+        reactor=qual(reactor.__class__).split('.')[-1],
+    )
 
     # set process title if requested to
     #
@@ -143,12 +183,7 @@ def run():
         if options.title:
             setproctitle.setproctitle(options.title)
         else:
-            WORKER_TYPE_TO_TITLE = {
-                'router': 'crossbar-worker [router]',
-                'container': 'crossbar-worker [container]',
-                'websocket-testee': 'crossbar-worker [websocket-testee]'
-            }
-            setproctitle.setproctitle(WORKER_TYPE_TO_TITLE[options.type].strip())
+            setproctitle.setproctitle('crossbar-worker [{}]'.format(options.klass))
 
     # node directory
     #
@@ -156,15 +191,19 @@ def run():
     os.chdir(options.cbdir)
     # log.msg("Starting from node directory {}".format(options.cbdir))
 
-    from crossbar.worker.router import RouterWorkerSession
-    from crossbar.worker.container import ContainerWorkerSession
-    from crossbar.worker.testee import WebSocketTesteeWorkerSession
-
-    WORKER_TYPE_TO_CLASS = {
-        'router': RouterWorkerSession,
-        'container': ContainerWorkerSession,
-        'websocket-testee': WebSocketTesteeWorkerSession
-    }
+    # set process title if requested to
+    #
+    try:
+        import setproctitle
+    except ImportError:
+        log.debug("Could not set worker process title (setproctitle not installed)")
+    else:
+        if options.title:
+            setproctitle.setproctitle(options.title)
+        else:
+            setproctitle.setproctitle(
+                'crossbar-worker [{}]'.format(options.klass)
+            )
 
     from twisted.internet.error import ConnectionDone
     from autobahn.twisted.websocket import WampWebSocketServerProtocol
@@ -219,7 +258,7 @@ def run():
 
         session_config = ComponentConfig(realm=options.realm, extra=options)
         session_factory = ApplicationSessionFactory(session_config)
-        session_factory.session = WORKER_TYPE_TO_CLASS[options.type]
+        session_factory.session = klass
 
         # create a WAMP-over-WebSocket transport server factory
         #
@@ -269,4 +308,4 @@ def run():
 
 
 if __name__ == '__main__':
-    run()
+    run(get_argument_parser().parse_args())

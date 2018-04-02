@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -28,13 +28,13 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
+from __future__ import absolute_import, print_function
 
 import argparse
 import click
+import importlib
 import json
 import os
-import pkg_resources
 import platform
 import signal
 import sys
@@ -52,6 +52,39 @@ from crossbar._logging import make_stdout_observer
 from crossbar._logging import make_stderr_observer
 from crossbar._logging import LogLevel
 
+
+def get_defined_personalities():
+    """
+    Return a list of personality names defined.
+    """
+    return ['community', 'fabric', 'fabriccenter']
+
+
+def get_installed_personalities():
+    """
+    Return a map from personality names to actual available (=installed) Personality classes.
+    """
+    from crossbar.controller.personality import Personality as CommunityPersonality
+
+    PKLASSES = {
+        'community': CommunityPersonality
+    }
+
+    try:
+        from crossbarfabric.personality import Personality as FabricPersonality
+        PKLASSES['fabric'] = FabricPersonality
+    except ImportError:
+        pass
+
+    try:
+        from crossbarfabriccenter.personality import Personality as FabricCenterPersonality
+        PKLASSES['fabriccenter'] = FabricCenterPersonality
+    except ImportError:
+        pass
+
+    return PKLASSES
+
+
 import crossbar
 
 from autobahn.twisted.choosereactor import install_reactor
@@ -59,10 +92,10 @@ from autobahn.websocket.protocol import WebSocketProtocol
 from autobahn.websocket.utf8validator import Utf8Validator
 from autobahn.websocket.xormasker import XorMaskerNull
 
-from crossbar.controller.node import Node, _read_release_pubkey, _read_node_pubkey
 from crossbar.controller.template import Templates
 from crossbar.common.checkconfig import check_config_file, \
     color_json, convert_config_file, upgrade_config_file, InvalidConfigException
+from crossbar.worker import process
 
 try:
     import psutil
@@ -90,14 +123,17 @@ except ImportError:
 
 __all__ = ('run',)
 
-# http://patorjk.com/software/taag/#p=display&h=1&f=Stick%20Letters&t=Crossbar.io
-BANNER = r"""     __  __  __  __  __  __      __     __
-    /  `|__)/  \/__`/__`|__) /\ |__)  |/  \
-    \__,|  \\__/.__/.__/|__)/~~\|  \. |\__/
-
-"""
-
 _PID_FILENAME = 'node.pid'
+
+
+def get_version(name_or_module):
+    if isinstance(name_or_module, str):
+        name_or_module = importlib.import_module(name_or_module)
+
+    try:
+        return name_or_module.__version__
+    except AttributeError:
+        return ''
 
 
 def check_pid_exists(pid):
@@ -133,7 +169,7 @@ def _is_crossbar_process(cmdline):
     """
     if len(cmdline) > 1 and 'crossbar' in cmdline[1]:
         return True
-    if cmdline[0] == 'crossbar-controller':
+    if len(cmdline) > 0 and cmdline[0] == 'crossbar-controller':
         return True
     return False
 
@@ -224,21 +260,24 @@ def run_command_version(options, reactor=None, **kwargs):
     else:
         py_ver_detail = platform.python_implementation()
 
+    # Pyinstaller (frozen EXE)
+    py_is_frozen = getattr(sys, 'frozen', False)
+
     # Twisted / Reactor
-    tx_ver = "%s-%s" % (pkg_resources.require("Twisted")[0].version, reactor.__class__.__name__)
+    tx_ver = "%s-%s" % (get_version('twisted'), reactor.__class__.__name__)
     tx_loc = "[%s]" % qual(reactor.__class__)
 
     # txaio
-    txaio_ver = '%s' % pkg_resources.require("txaio")[0].version
+    txaio_ver = get_version('txaio')
 
     # Autobahn
-    ab_ver = pkg_resources.require("autobahn")[0].version
+    ab_ver = get_version('autobahn')
     ab_loc = "[%s]" % qual(WebSocketProtocol)
 
     # UTF8 Validator
     s = qual(Utf8Validator)
     if 'wsaccel' in s:
-        utf8_ver = 'wsaccel-%s' % pkg_resources.require('wsaccel')[0].version
+        utf8_ver = 'wsaccel-%s' % get_version('wsaccel')
     elif s.startswith('autobahn'):
         utf8_ver = 'autobahn'
     else:
@@ -249,7 +288,7 @@ def run_command_version(options, reactor=None, **kwargs):
     # XOR Masker
     s = qual(XorMaskerNull)
     if 'wsaccel' in s:
-        xor_ver = 'wsaccel-%s' % pkg_resources.require('wsaccel')[0].version
+        xor_ver = 'wsaccel-%s' % get_version('wsaccel')
     elif s.startswith('autobahn'):
         xor_ver = 'autobahn'
     else:
@@ -259,12 +298,19 @@ def run_command_version(options, reactor=None, **kwargs):
 
     # JSON Serializer
     supported_serializers = ['JSON']
-    json_ver = 'stdlib'
+    from autobahn.wamp.serializer import JsonObjectSerializer
+    json_ver = JsonObjectSerializer.JSON_MODULE.__name__
+
+    # If it's just 'json' then it's the stdlib one...
+    if json_ver == 'json':
+        json_ver = 'stdlib'
+    else:
+        json_ver = (json_ver + "-%s") % get_version(json_ver)
 
     # MsgPack Serializer
     try:
         import umsgpack  # noqa
-        msgpack_ver = 'u-msgpack-python-%s' % pkg_resources.require('u-msgpack-python')[0].version
+        msgpack_ver = 'u-msgpack-python-%s' % get_version(umsgpack)
         supported_serializers.append('MessagePack')
     except ImportError:
         msgpack_ver = '-'
@@ -272,7 +318,7 @@ def run_command_version(options, reactor=None, **kwargs):
     # CBOR Serializer
     try:
         import cbor  # noqa
-        cbor_ver = 'cbor-%s' % pkg_resources.require('cbor')[0].version
+        cbor_ver = 'cbor-%s' % get_version(cbor)
         supported_serializers.append('CBOR')
     except ImportError:
         cbor_ver = '-'
@@ -280,7 +326,7 @@ def run_command_version(options, reactor=None, **kwargs):
     # UBJSON Serializer
     try:
         import ubjson  # noqa
-        ubjson_ver = 'ubjson-%s' % pkg_resources.require('py-ubjson')[0].version
+        ubjson_ver = 'ubjson-%s' % get_version(ubjson)
         supported_serializers.append('UBJSON')
     except ImportError:
         ubjson_ver = '-'
@@ -289,40 +335,68 @@ def run_command_version(options, reactor=None, **kwargs):
     try:
         import lmdb  # noqa
         lmdb_lib_ver = '.'.join([str(x) for x in lmdb.version()])
-        lmdb_ver = '{}/lmdb-{}'.format(pkg_resources.require('lmdb')[0].version, lmdb_lib_ver)
+        lmdb_ver = '{}/lmdb-{}'.format(get_version(lmdb), lmdb_lib_ver)
     except ImportError:
         lmdb_ver = '-'
 
+    # crossbarfabric (only Crossbar.io FABRIC)
+    try:
+        from crossbarfabric._version import __version__ as crossbarfabric_ver  # noqa
+    except ImportError:
+        crossbarfabric_ver = '-'
+
+    # crossbarfabriccenter (only Crossbar.io FABRIC CENTER)
+    try:
+        from crossbarfabriccenter._version import __version__ as crossbarfabriccenter_ver  # noqa
+    except ImportError:
+        crossbarfabriccenter_ver = '-'
+
+    # txaio-etcd (only Crossbar.io FABRIC CENTER)
+    try:
+        import txaioetcd  # noqa
+        txaioetcd_ver = get_version(txaioetcd)
+    except ImportError:
+        txaioetcd_ver = '-'
+
     # Release Public Key
+    from crossbar.controller.node import _read_release_pubkey
     release_pubkey = _read_release_pubkey()
 
     def decorate(text):
         return click.style(text, fg='yellow', bold=True)
 
-    for line in BANNER.splitlines():
+    Node = get_installed_personalities()[options.personality].NodeKlass
+
+    for line in Node.BANNER.splitlines():
         log.info(decorate("{:>40}".format(line)))
 
     pad = " " * 22
 
-    log.info(" Crossbar.io        : {ver}", ver=decorate(crossbar.__version__))
+    log.info(" Crossbar.io        : {ver} ({personality})", ver=decorate(crossbar.__version__), personality=Node.PERSONALITY)
     log.info("   Autobahn         : {ver} (with {serializers})", ver=decorate(ab_ver), serializers=', '.join(supported_serializers))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(ab_loc))
-    log.debug("     txaio             : {ver}", ver=decorate(txaio_ver))
-    log.debug("     UTF8 Validator    : {ver}", ver=decorate(utf8_ver))
+    log.debug("     txaio          : {ver}", ver=decorate(txaio_ver))
+    log.debug("     UTF8 Validator : {ver}", ver=decorate(utf8_ver))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(utf8_loc))
-    log.debug("     XOR Masker        : {ver}", ver=decorate(xor_ver))
+    log.debug("     XOR Masker     : {ver}", ver=decorate(xor_ver))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(xor_loc))
-    log.debug("     JSON Codec        : {ver}", ver=decorate(json_ver))
-    log.debug("     MessagePack Codec : {ver}", ver=decorate(msgpack_ver))
-    log.debug("     CBOR Codec        : {ver}", ver=decorate(cbor_ver))
-    log.debug("     UBJSON Codec      : {ver}", ver=decorate(ubjson_ver))
+    log.debug("     JSON Codec     : {ver}", ver=decorate(json_ver))
+    log.debug("     MsgPack Codec  : {ver}", ver=decorate(msgpack_ver))
+    log.debug("     CBOR Codec     : {ver}", ver=decorate(cbor_ver))
+    log.debug("     UBJSON Codec   : {ver}", ver=decorate(ubjson_ver))
     log.info("   Twisted          : {ver}", ver=decorate(tx_ver))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(tx_loc))
     log.info("   LMDB             : {ver}", ver=decorate(lmdb_ver))
     log.info("   Python           : {ver}/{impl}", ver=decorate(py_ver), impl=decorate(py_ver_detail))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(py_ver_string))
-    log.info(" OS                 : {ver}", ver=decorate(platform.platform()))
-    log.info(" Machine            : {ver}", ver=decorate(platform.machine()))
+    if options.personality in (u'fabric', u'fabriccenter'):
+        log.info(" Crossbar.io Fabric : {ver}", ver=decorate(crossbarfabric_ver))
+    if options.personality == u'fabriccenter':
+        log.info(" Crossbar.io FC     : {ver}", ver=decorate(crossbarfabriccenter_ver))
+        log.debug("   txaioetcd        : {ver}", ver=decorate(txaioetcd_ver))
+    log.info(" Frozen executable  : {py_is_frozen}", py_is_frozen=decorate('yes' if py_is_frozen else 'no'))
+    log.info(" Operating system   : {ver}", ver=decorate(platform.platform()))
+    log.info(" Host machine       : {ver}", ver=decorate(platform.machine()))
     log.info(" Release key        : {release_pubkey}", release_pubkey=decorate(release_pubkey[u'base64']))
     log.info("")
 
@@ -332,6 +406,8 @@ def run_command_keys(options, reactor=None, **kwargs):
     Subcommand "crossbar keys".
     """
     log = make_logger()
+
+    from crossbar.controller.node import _read_release_pubkey, _read_node_pubkey
 
     # Release (public) key
     release_pubkey = _read_release_pubkey()
@@ -591,45 +667,48 @@ def run_command_start(options, reactor=None):
 
     # represents the running Crossbar.io node
     #
+    Node = get_installed_personalities()[options.personality].NodeKlass
     node = Node(options.cbdir, reactor=reactor)
 
     # possibly generate new node key
     #
     pubkey = node.maybe_generate_key(options.cbdir)
 
+    # Print the banner.
+    #
+    for line in Node.BANNER.splitlines():
+        log.info(click.style(("{:>40}").format(line), fg='yellow', bold=True))
+
+    bannerFormat = "{:<12} {:<24}"
+    log.info(bannerFormat.format("Version:", click.style('{} {}'.format(node.PERSONALITY, crossbar.__version__), fg='yellow', bold=True)))
+    if pubkey:
+        log.info(bannerFormat.format("Public Key:", click.style(pubkey, fg='yellow', bold=True)))
+    log.info()
+
+    log.info('Node starting with personality "{node_personality}" [{node_class}]', node_personality=options.personality, node_class='{}.{}'.format(Node.__module__, Node.__name__))
+
+    log.info('Running from node directory "{cbdir}"', cbdir=options.cbdir)
+
     # check and load the node configuration
     #
     try:
         node.load(options.config)
     except InvalidConfigException as e:
+        log.failure()
         log.error("Invalid node configuration")
         log.error("{e!s}", e=e)
         sys.exit(1)
     except:
         raise
 
-    # Print the banner.
-    #
-    for line in BANNER.splitlines():
-        log.info(click.style(("{:>40}").format(line), fg='yellow', bold=True))
-
-    # bannerFormat = "{:<18} {:<24}"
-    bannerFormat = "    {} {}"
-    log.info(bannerFormat.format("Crossbar.io Version:", click.style(crossbar.__version__, fg='yellow', bold=True)))
-    if pubkey:
-        log.info(bannerFormat.format("Node Public Key:", click.style(pubkey, fg='yellow', bold=True)))
-    log.info()
-
-    log.info("Running from node directory '{cbdir}'", cbdir=options.cbdir)
-
-    log.info("Controller process starting ({python}-{reactor}) ..",
+    log.info("Controller process starting [{python}-{reactor}] ..",
              python=platform.python_implementation(),
              reactor=qual(reactor.__class__).split('.')[-1])
 
     # now actually start the node ..
     #
     def start_crossbar():
-        d = node.start(cdc_mode=options.cdc)
+        d = node.start()
 
         def on_error(err):
             log.error("{e!s}", e=err.value)
@@ -640,12 +719,23 @@ def run_command_start(options, reactor=None):
 
     reactor.callWhenRunning(start_crossbar)
 
-    # enter event loop
+    def after_reactor_stopped():
+        # FIXME: we are indeed reaching this line, however,
+        # the log output does not work (it also doesnt work using
+        # plain old print). Dunno why.
+        log.info('Node has been shut down [after_reactor_stopped].')
+
+    reactor.addSystemEventTrigger('after', 'shutdown', after_reactor_stopped)
+
+    # now enter event loop ..
     #
     try:
         reactor.run()
     except Exception:
         log.failure("Could not start reactor - {log_failure.value}")
+
+    # this line is _never_ reached! Twisted reactor will sys.exit() before
+    # under all circumstances
 
 
 def run_command_restart(options, **kwargs):
@@ -665,13 +755,15 @@ def run_command_check(options, **kwargs):
     """
     Subcommand "crossbar check".
     """
+    from crossbar.controller.node import default_native_workers
+
     configfile = os.path.join(options.cbdir, options.config)
 
     verbose = False
 
     try:
         print("Checking local node configuration file: {}".format(configfile))
-        config = check_config_file(configfile)
+        config = check_config_file(configfile, default_native_workers())
     except Exception as e:
         print("Error: {}".format(e))
         sys.exit(1)
@@ -726,6 +818,22 @@ def run_command_upgrade(options, **kwargs):
         sys.exit(0)
 
 
+def run_command_keygen(options, **kwargs):
+    """
+    Subcommand "crossbar keygen".
+    """
+
+    try:
+        from autobahn.wamp.cryptobox import KeyRing
+    except ImportError:
+        print("You should install 'autobahn[encryption]'")
+        sys.exit(1)
+
+    priv, pub = KeyRing().generate_key()
+    print('  private: {}'.format(priv))
+    print('   public: {}'.format(pub))
+
+
 def run(prog=None, args=None, reactor=None):
     """
     Entry point of Crossbar.io CLI.
@@ -748,7 +856,7 @@ def run(prog=None, args=None, reactor=None):
     # create the top-level parser
     #
     parser = argparse.ArgumentParser(prog='crossbar',
-                                     description="Crossbar.io - Polyglot application router - http://crossbar.io")
+                                     description="Crossbar.io - https://crossbar.io")
 
     # top-level options
     #
@@ -768,6 +876,12 @@ def run(prog=None, args=None, reactor=None):
     #
     parser_version = subparsers.add_parser('version',
                                            help='Print software versions.')
+
+    parser_version.add_argument('--personality',
+                                type=six.text_type,
+                                default='community',
+                                choices=get_defined_personalities(),
+                                help=("Node personality to run."))
 
     parser_version.add_argument('--loglevel',
                                 **loglevel_args)
@@ -810,6 +924,13 @@ def run(prog=None, args=None, reactor=None):
                              default=None,
                              help="Application base directory where to create app and node from template.")
 
+    # Start a worker
+    #
+    parser_worker = subparsers.add_parser('start-worker', help='Start a worker process')
+    parser_worker = process.get_argument_parser(parser_worker)
+
+    parser_worker.set_defaults(func=process.run)
+
     # "templates" command
     #
     parser_templates = subparsers.add_parser('templates',
@@ -824,11 +945,6 @@ def run(prog=None, args=None, reactor=None):
 
     parser_start.set_defaults(func=run_command_start)
 
-    parser_start.add_argument('--cdc',
-                              action='store_true',
-                              default=False,
-                              help='Start node in managed mode, connecting to Crossbar.io DevOps Center (CDC).')
-
     parser_start.add_argument('--cbdir',
                               type=six.text_type,
                               default=None,
@@ -838,6 +954,12 @@ def run(prog=None, args=None, reactor=None):
                               type=six.text_type,
                               default=None,
                               help="Crossbar.io configuration file (overrides default CBDIR/config.json)")
+
+    parser_start.add_argument('--personality',
+                              type=six.text_type,
+                              default='community',
+                              choices=get_defined_personalities(),
+                              help=("Node personality to run."))
 
     parser_start.add_argument('--logdir',
                               type=six.text_type,
@@ -952,6 +1074,16 @@ def run(prog=None, args=None, reactor=None):
                               default=None,
                               help="Crossbar.io configuration file (overrides default CBDIR/config.json)")
 
+    # "keygen" command
+    #
+    help_text = 'Generate public/private keypairs for use with autobahn.wamp.cryptobox.KeyRing'
+    parser_keygen = subparsers.add_parser(
+        'keygen',
+        help=help_text,
+        description=help_text,
+    )
+    parser_keygen.set_defaults(func=run_command_keygen)
+
     # parse cmd line args
     #
     options = parser.parse_args(args)
@@ -965,6 +1097,24 @@ def run(prog=None, args=None, reactor=None):
     if sys.platform == 'win32':
         options.colour = False
 
+    # IMPORTANT: keep the reactor install as early as possible to
+    # avoid importing any Twisted module that comes with the side effect
+    # of installing a default reactor (which might not be what we want!).
+    if not reactor:
+        # we use an Autobahn utility to import the "best" available Twisted reactor
+        reactor = install_reactor(explicit_reactor=options.reactor,
+                                  verbose=False,
+                                  require_optimal_reactor=False)
+
+    # ################## Twisted reactor installed FROM HERE ##################
+
+    # Node personality
+    #
+    if hasattr(options, 'personality'):
+        if options.personality not in get_installed_personalities():
+            print('FATAL: no Crossbar.io node personality "{}" installed'.format(options.personality))
+            sys.exit(1)
+
     # Crossbar.io node directory
     #
     if hasattr(options, 'cbdir'):
@@ -975,6 +1125,7 @@ def run(prog=None, args=None, reactor=None):
                 options.cbdir = '.crossbar'
             else:
                 options.cbdir = '.'
+
         options.cbdir = os.path.abspath(options.cbdir)
 
         # convenience: if --cbdir points to a config file, take
@@ -982,12 +1133,22 @@ def run(prog=None, args=None, reactor=None):
         if os.path.isfile(options.cbdir):
             options.cbdir = os.path.dirname(options.cbdir)
 
+        # convenience: auto-create directory if not existing
+        if not os.path.isdir(options.cbdir):
+            try:
+                os.mkdir(options.cbdir)
+            except Exception as e:
+                print("Could not create node directory: {}".format(e))
+                sys.exit(1)
+            else:
+                print("Auto-created node directory {}".format(options.cbdir))
+
     # Crossbar.io node configuration file
     #
     if hasattr(options, 'config'):
         # if not explicit config filename is given, try to auto-detect .
         if not options.config:
-            for f in ['config.json', 'config.yaml']:
+            for f in ['config.yaml', 'config.json']:
                 fn = os.path.join(options.cbdir, f)
                 if os.path.isfile(fn) and os.access(fn, os.R_OK):
                     options.config = f
@@ -1004,21 +1165,11 @@ def run(prog=None, args=None, reactor=None):
                 except Exception as e:
                     print("Could not create log directory: {e}".format(e))
                     sys.exit(1)
-
-    if not reactor:
-        # try and get the log verboseness we want -- not all commands have a
-        # loglevel, so just default to info in that case
-        debug = getattr(options, "loglevel", "info") in ("debug", "trace")
-
-        # we use an Autobahn utility to import the "best" available Twisted
-        # reactor
-        if options.reactor:
-            from twisted.python.reflect import namedAny
-            reactor = namedAny('twisted.internet.' + options.reactor + 'reactor').install()
-        else:
-            reactor = install_reactor(options.reactor)
+                else:
+                    print("Auto-created log directory {}".format(options.logdir))
 
     # Start the logger
+    #
     _startlog(options, reactor)
 
     # run the subcommand selected

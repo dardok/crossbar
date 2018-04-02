@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -85,13 +85,13 @@ class PendingAuthCryptosign(PendingAuth):
     def _compute_challenge(self, channel_binding):
         self._challenge = os.urandom(32)
 
-        if self._channel_id:
+        if self._channel_id and channel_binding:
             self._expected_signed_message = util.xor(self._challenge, self._channel_id)
         else:
             self._expected_signed_message = self._challenge
 
         extra = {
-            u'challenge': binascii.b2a_hex(self._challenge)
+            u'challenge': binascii.b2a_hex(self._challenge).decode('ascii')
         }
         return extra
 
@@ -101,9 +101,10 @@ class PendingAuthCryptosign(PendingAuth):
         if channel_binding is not None and channel_binding not in [u'tls-unique']:
             return types.Deny(message=u'invalid channel binding type "{}" requested'.format(channel_binding))
         else:
-            self.log.info(
-                "WAMP-cryptosign CHANNEL BINDING requested: {binding}",
-                binding=channel_binding,
+            self.log.debug(
+                "WAMP-cryptosign CHANNEL BINDING requested: channel_binding={channel_binding}, channel_id={channel_id}",
+                channel_binding=channel_binding,
+                channel_id=self._channel_id
             )
 
         # remember the realm the client requested to join (if any)
@@ -170,6 +171,8 @@ class PendingAuthCryptosign(PendingAuth):
                 return error
 
             self._session_details[u'authmethod'] = self._authmethod  # from AUTHMETHOD, via base
+            self._session_details[u'authid'] = details.authid
+            self._session_details[u'authrole'] = details.authrole
             self._session_details[u'authextra'] = details.authextra
 
             d = self._authenticator_session.call(self._authenticator, realm, details.authid, self._session_details)

@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -34,6 +34,8 @@ from crossbar.router.auth.anonymous import PendingAuthAnonymous  # noqa
 from crossbar.router.auth.wampcra import PendingAuthWampCra  # noqa
 from crossbar.router.auth.ticket import PendingAuthTicket  # noqa
 from crossbar.router.auth.tls import PendingAuthTLS  # noqa
+from crossbar.router.auth.scram import PendingAuthScram  # noqa
+
 
 AUTHMETHODS = set([
     u'ticket',
@@ -41,7 +43,8 @@ AUTHMETHODS = set([
     u'tls',
     u'cryptosign',
     u'cookie',
-    u'anonymous'
+    u'anonymous',
+    u'scram',
 ])
 
 # map of authmethod name to processor class
@@ -53,6 +56,7 @@ AUTHMETHOD_MAP = {
     u'wampcra': PendingAuthWampCra,
     u'tls': PendingAuthTLS,
     u'cookie': None,
+    u'scram': PendingAuthScram,
 }
 
 try:

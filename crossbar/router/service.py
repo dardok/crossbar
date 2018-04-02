@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -30,12 +30,15 @@
 
 from __future__ import absolute_import
 
-from twisted.internet.defer import inlineCallbacks, DeferredList
+from twisted.internet.defer import inlineCallbacks
+from twisted.python.failure import Failure
 
-from autobahn import wamp
+from autobahn import wamp, util
+from autobahn.wamp import message
 from autobahn.wamp.exception import ApplicationError
 from autobahn.twisted.wamp import ApplicationSession
 from autobahn.wamp.types import RegisterOptions
+from autobahn.wamp.request import Registration
 
 from crossbar.router.observation import is_protected_uri
 
@@ -51,6 +54,8 @@ def is_restricted_session(session):
 class RouterServiceSession(ApplicationSession):
 
     """
+    User router-realm service session, and WAMP meta API implementation.
+
     Router service session which is used internally by a router to
     issue WAMP calls or publish events, and which provides WAMP meta API
     procedures.
@@ -71,6 +76,7 @@ class RouterServiceSession(ApplicationSession):
         """
         ApplicationSession.__init__(self, config)
         self._router = router
+
         self._schemas = {}
         if schemas:
             self._schemas.update(schemas)
@@ -79,6 +85,61 @@ class RouterServiceSession(ApplicationSession):
                 entries=len(self._schemas),
             )
 
+        # the service session can expose its API on multiple sessions
+        # by default, it exposes its API only on itself, and that means, on the
+        # router-realm the user started
+        self._expose_on_sessions = []
+
+        enable_meta_api = self.config.extra.get('enable_meta_api', True) if self.config.extra else True
+        if enable_meta_api:
+            self._expose_on_sessions.append((self, None, None))
+
+        # optionally, when this option is set, the service session exposes its API
+        # additionally on the management session to the local node router (and from there, to CFC)
+        bridge_meta_api = self.config.extra.get('bridge_meta_api', False) if self.config.extra else False
+        if bridge_meta_api:
+
+            management_session = self.config.extra.get('management_session', None) if self.config.extra else None
+            if management_session is None:
+                raise Exception('logic error: missing management_session in extra')
+
+            bridge_meta_api_prefix = self.config.extra.get('bridge_meta_api_prefix', None) if self.config.extra else None
+            if bridge_meta_api_prefix is None:
+                raise Exception('logic error: missing bridge_meta_api_prefix in extra')
+
+            self._expose_on_sessions.append((management_session, bridge_meta_api_prefix, u'-'))
+
+    def publish(self, topic, *args, **kwargs):
+        # WAMP meta events published over the service session are published on the
+        # service session itself (the first in the list of sessions to expose), and potentially
+        # more sessions - namely the management session on the local node router
+        dl = []
+        for session, prefix, replace_dots in self._expose_on_sessions:
+
+            translated_topic = topic
+
+            # we cannot subscribe in CFC to topics of the form
+            # crossbarfabriccenter.node.<node_id>.worker.<worker_id>.realm.<realm_id>.root.*,
+            # where * is an arbitrary suffix including dots, eg "wamp.session.on_join"
+            #
+            # to work around that, we replace the "."s in the suffix with "-", and reverse that
+            # in CFC
+            if replace_dots:
+                translated_topic = translated_topic.replace(u'.', replace_dots)
+
+            if prefix:
+                translated_topic = u'{}{}'.format(prefix, translated_topic)
+
+            self.log.debug('RouterServiceSession.publish("{topic}") -> "{translated_topic}" on "{realm}"',
+                           topic=topic, translated_topic=translated_topic, realm=session._realm)
+
+            dl.append(ApplicationSession.publish(session, translated_topic, *args, **kwargs))
+
+        # to keep the interface of ApplicationSession.publish, we only return the first
+        # publish return (that is the return from publishing to the user router-realm)
+        if len(dl) > 0:
+            return dl[0]
+
     @inlineCallbacks
     def onJoin(self, details):
         self.log.debug(
@@ -86,39 +147,34 @@ class RouterServiceSession(ApplicationSession):
             details=details,
         )
 
-        if True:
-            procs = [
-                (u'wamp.session.list', self.session_list),
-                (u'wamp.session.count', self.session_count),
-                (u'wamp.session.get', self.session_get),
-                (u'wamp.session.kill', self.session_kill),
-                (u'wamp.registration.remove_callee', self.registration_remove_callee),
-                (u'wamp.subscription.remove_subscriber', self.subscription_remove_subscriber),
-                (u'wamp.registration.get', self.registration_get),
-                (u'wamp.subscription.get', self.subscription_get),
-                (u'wamp.registration.list', self.registration_list),
-                (u'wamp.subscription.list', self.subscription_list),
-                (u'wamp.registration.match', self.registration_match),
-                (u'wamp.subscription.match', self.subscription_match),
-                (u'wamp.registration.lookup', self.registration_lookup),
-                (u'wamp.subscription.lookup', self.subscription_lookup),
-                (u'wamp.registration.list_callees', self.registration_list_callees),
-                (u'wamp.subscription.list_subscribers', self.subscription_list_subscribers),
-                (u'wamp.registration.count_callees', self.registration_count_callees),
-                (u'wamp.subscription.count_subscribers', self.subscription_count_subscribers),
-                (u'wamp.subscription.get_events', self.subscription_get_events),
-            ]
-            dl = []
-            for uri, proc in procs:
-                dl.append(self.register(proc, uri, options=RegisterOptions(details_arg='details')))
-            regs = yield DeferredList(dl)
+        # register our API on all configured sessions and then fire onready
+        #
+        on_ready = self.config.extra.get('onready', None) if self.config.extra else None
+        try:
+            for session, prefix, _ in self._expose_on_sessions:
+                regs = yield session.register(self, options=RegisterOptions(details_arg='details'), prefix=prefix)
+                for reg in regs:
+                    if isinstance(reg, Registration):
+                        self.log.debug('Registered WAMP meta procedure <{proc}> on realm "{realm}"', proc=reg.procedure, realm=session._realm)
+                    elif isinstance(reg, Failure):
+                        err = reg.value
+                        if isinstance(err, ApplicationError):
+                            self.log.warn('Failed to register WAMP meta procedure on realm "{realm}": {error} ("{message}")', realm=session._realm, error=err.error, message=err.error_message())
+                        else:
+                            self.log.warn('Failed to register WAMP meta procedure on realm "{realm}": {error}', realm=session._realm, error=str(err))
+                    else:
+                        self.log.warn('Failed to register WAMP meta procedure on realm "{realm}": {error}', realm=session._realm, error=str(reg))
+        except Exception as e:
+            self.log.failure()
+            if on_ready:
+                on_ready.errback(e)
+            self.leave()
         else:
-            regs = yield self.register(self)
-
-        self.log.debug('Registered {regs} procedures', regs=regs)
-
-        if self.config.extra and 'onready' in self.config.extra:
-            self.config.extra['onready'].callback(self)
+            if on_ready:
+                on_ready.callback(self)
+                self.log.info('RouterServiceSession ready [configured on_ready fired]')
+            else:
+                self.log.info('RouterServiceSession ready [no on_ready configured]')
 
     def onUserError(self, failure, msg):
         # ApplicationError's are raised explicitly and by purpose to signal
@@ -180,7 +236,7 @@ class RouterServiceSession(ApplicationSession):
         :returns: WAMP session details.
         :rtype: dict or None
         """
-        self.log.info('wamp.session.get("{session_id}")', session_id=session_id)
+        self.log.debug('wamp.session.get("{session_id}")', session_id=session_id)
         if session_id in self._router._session_id_to_session:
             session = self._router._session_id_to_session[session_id]
             if not is_restricted_session(session):
@@ -190,6 +246,75 @@ class RouterServiceSession(ApplicationSession):
             u'no session with ID {} exists on this router'.format(session_id),
         )
 
+    @wamp.register(u'wamp.session.add_testament')
+    def session_add_testament(self, topic, args, kwargs, publish_options=None, scope=u"destroyed", details=None):
+        """
+        Add a testament to the current session.
+
+        :param topic: The topic to publish the testament to.
+        :type topic: str
+
+        :param args: A list of arguments for the publish.
+        :type args: list or tuple
+
+        :param kwargs: A dict of keyword arguments for the publish.
+        :type kwargs: dict
+
+        :param publish_options: The publish options for the publish.
+        :type publish_options: None or dict
+
+        :param scope: The scope of the testament, either "detatched" or
+            "destroyed".
+        :type scope: str
+
+        :returns: The publication ID.
+        :rtype: int
+        """
+        session = self._router._session_id_to_session[details.caller]
+
+        if scope not in [u"destroyed", u"detatched"]:
+            raise ApplicationError(u"wamp.error.testament_error", u"scope must be destroyed or detatched")
+
+        pub_id = util.id()
+
+        # Get the publish options, remove some explicit keys
+        publish_options = publish_options or {}
+        publish_options.pop("acknowledge", None)
+        publish_options.pop("exclude_me", None)
+
+        pub = message.Publish(
+            request=pub_id,
+            topic=topic,
+            args=args,
+            kwargs=kwargs,
+            **publish_options)
+
+        session._testaments[scope].append(pub)
+
+        return pub_id
+
+    @wamp.register(u'wamp.session.flush_testaments')
+    def session_flush_testaments(self, scope=u"destroyed", details=None):
+        """
+        Flush the testaments of a given scope.
+
+        :param scope: The scope to flush, either "detatched" or "destroyed".
+        :type scope: str
+
+        :returns: Number of flushed testament events.
+        :rtype: int
+        """
+        session = self._router._session_id_to_session[details.caller]
+
+        if scope not in [u"destroyed", u"detatched"]:
+            raise ApplicationError(u"wamp.error.testament_error", u"scope must be destroyed or detatched")
+
+        flushed = len(session._testaments[scope])
+
+        session._testaments[scope] = []
+
+        return flushed
+
     @wamp.register(u'wamp.session.kill')
     def session_kill(self, session_id, reason=None, message=None, details=None):
         """
@@ -198,7 +323,7 @@ class RouterServiceSession(ApplicationSession):
         :param session_id: The WAMP session ID of the session to kill.
         :type session_id: int
         :param reason: A reason URI provided to the killed session.
-        :type reason: unicode or None
+        :type reason: str or None
         """
         if session_id in self._router._session_id_to_session:
             session = self._router._session_id_to_session[session_id]
@@ -229,7 +354,12 @@ class RouterServiceSession(ApplicationSession):
             )
 
         registration = self._router._dealer._registration_map.get_observation_by_id(registration_id)
-        if registration and not is_protected_uri(registration.uri, details):
+        if registration:
+            if is_protected_uri(registration.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to remove callee for protected URI "{}"'.format(registration.uri),
+                )
 
             if callee not in registration.observers:
                 raise ApplicationError(
@@ -263,7 +393,12 @@ class RouterServiceSession(ApplicationSession):
             )
 
         subscription = self._router._broker._subscription_map.get_observation_by_id(subscription_id)
-        if subscription and not is_protected_uri(subscription.uri, details):
+        if subscription:
+            if is_protected_uri(subscription.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to remove subscriber for protected URI "{}"'.format(subscription.uri),
+                )
 
             if subscriber not in subscription.observers:
                 raise ApplicationError(
@@ -291,7 +426,13 @@ class RouterServiceSession(ApplicationSession):
         """
         registration = self._router._dealer._registration_map.get_observation_by_id(registration_id)
 
-        if registration and not is_protected_uri(registration.uri, details):
+        if registration:
+            if is_protected_uri(registration.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to get registration for protected URI "{}"'.format(registration.uri),
+                )
+
             registration_details = {
                 u'id': registration.id,
                 u'created': registration.created,
@@ -319,7 +460,13 @@ class RouterServiceSession(ApplicationSession):
         """
         subscription = self._router._broker._subscription_map.get_observation_by_id(subscription_id)
 
-        if subscription and is_protected_uri(subscription.uri, details):
+        if subscription:
+            if is_protected_uri(subscription.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to get subscription for protected URI "{}"'.format(subscription.uri),
+                )
+
             subscription_details = {
                 u'id': subscription.id,
                 u'created': subscription.created,
@@ -334,7 +481,7 @@ class RouterServiceSession(ApplicationSession):
             )
 
     @wamp.register(u'wamp.registration.list')
-    def registration_list(self, details=None):
+    def registration_list(self, session_id=None, details=None):
         """
         List current registrations.
 
@@ -342,33 +489,60 @@ class RouterServiceSession(ApplicationSession):
             and 'wildcard', with a list of registration IDs for each.
         :rtype: dict
         """
-        registration_map = self._router._dealer._registration_map
+        if session_id:
 
-        registrations_exact = []
-        for registration in registration_map._observations_exact.values():
-            if not is_protected_uri(registration.uri, details):
-                registrations_exact.append(registration.id)
+            s2r = self._router._dealer._session_to_registrations
+            session = None
 
-        registrations_prefix = []
-        for registration in registration_map._observations_prefix.values():
-            if not is_protected_uri(registration.uri, details):
-                registrations_prefix.append(registration.id)
+            if session_id in self._router._session_id_to_session:
+                session = self._router._session_id_to_session[session_id]
+                if is_restricted_session(session):
+                    session = None
 
-        registrations_wildcard = []
-        for registration in registration_map._observations_wildcard.values():
-            if not is_protected_uri(registration.uri, details):
-                registrations_wildcard.append(registration.id)
+            if not session or session not in s2r:
+                raise ApplicationError(
+                    ApplicationError.NO_SUCH_SESSION,
+                    u'no session with ID {} exists on this router'.format(session_id),
+                )
 
-        regs = {
-            u'exact': registrations_exact,
-            u'prefix': registrations_prefix,
-            u'wildcard': registrations_wildcard,
-        }
+            _regs = s2r[session]
 
-        return regs
+            regs = {
+                u'exact': [reg.id for reg in _regs if reg.match == u'exact'],
+                u'prefix': [reg.id for reg in _regs if reg.match == u'prefix'],
+                u'wildcard': [reg.id for reg in _regs if reg.match == u'wildcard'],
+            }
+            return regs
+
+        else:
+
+            registration_map = self._router._dealer._registration_map
+
+            registrations_exact = []
+            for registration in registration_map._observations_exact.values():
+                if not is_protected_uri(registration.uri, details):
+                    registrations_exact.append(registration.id)
+
+            registrations_prefix = []
+            for registration in registration_map._observations_prefix.values():
+                if not is_protected_uri(registration.uri, details):
+                    registrations_prefix.append(registration.id)
+
+            registrations_wildcard = []
+            for registration in registration_map._observations_wildcard.values():
+                if not is_protected_uri(registration.uri, details):
+                    registrations_wildcard.append(registration.id)
+
+            regs = {
+                u'exact': registrations_exact,
+                u'prefix': registrations_prefix,
+                u'wildcard': registrations_wildcard,
+            }
+
+            return regs
 
     @wamp.register(u'wamp.subscription.list')
-    def subscription_list(self, details=None):
+    def subscription_list(self, session_id=None, details=None):
         """
         List current subscriptions.
 
@@ -376,31 +550,58 @@ class RouterServiceSession(ApplicationSession):
             and 'wildcard', with a list of subscription IDs for each.
         :rtype: dict
         """
-        subscription_map = self._router._broker._subscription_map
+        if session_id:
 
-        subscriptions_exact = []
-        for subscription in subscription_map._observations_exact.values():
-            if is_protected_uri(subscription.uri, details):
-                subscriptions_exact.append(subscription.id)
+            s2s = self._router._broker._session_to_subscriptions
+            session = None
 
-        subscriptions_prefix = []
-        for subscription in subscription_map._observations_prefix.values():
-            if not is_protected_uri(subscription.uri, details):
-                subscriptions_prefix.append(subscription.id)
+            if session_id in self._router._session_id_to_session:
+                session = self._router._session_id_to_session[session_id]
+                if is_restricted_session(session):
+                    session = None
 
-        subscriptions_wildcard = []
-        # FIXME
-        # for subscription in subscription_map._observations_wildcard.values():
-        #     if not is_protected_uri(subscription.uri, details):
-        #         subscriptions_wildcard.append(subscription.id)
+            if not session or session not in s2s:
+                raise ApplicationError(
+                    ApplicationError.NO_SUCH_SESSION,
+                    u'no session with ID {} exists on this router'.format(session_id),
+                )
 
-        subs = {
-            u'exact': subscriptions_exact,
-            u'prefix': subscriptions_prefix,
-            u'wildcard': subscriptions_wildcard,
-        }
+            _subs = s2s[session]
 
-        return subs
+            subs = {
+                u'exact': [sub.id for sub in _subs if sub.match == u'exact'],
+                u'prefix': [sub.id for sub in _subs if sub.match == u'prefix'],
+                u'wildcard': [sub.id for sub in _subs if sub.match == u'wildcard'],
+            }
+            return subs
+
+        else:
+
+            subscription_map = self._router._broker._subscription_map
+
+            subscriptions_exact = []
+            for subscription in subscription_map._observations_exact.values():
+                if not is_protected_uri(subscription.uri, details):
+                    subscriptions_exact.append(subscription.id)
+
+            subscriptions_prefix = []
+            for subscription in subscription_map._observations_prefix.values():
+                if not is_protected_uri(subscription.uri, details):
+                    subscriptions_prefix.append(subscription.id)
+
+            subscriptions_wildcard = []
+            # FIXME
+            # for subscription in subscription_map._observations_wildcard.values():
+            #     if not is_protected_uri(subscription.uri, details):
+            #         subscriptions_wildcard.append(subscription.id)
+
+            subs = {
+                u'exact': subscriptions_exact,
+                u'prefix': subscriptions_prefix,
+                u'wildcard': subscriptions_wildcard,
+            }
+
+            return subs
 
     @wamp.register(u'wamp.registration.match')
     def registration_match(self, procedure, details=None):
@@ -410,7 +611,7 @@ class RouterServiceSession(ApplicationSession):
         This essentially models what a dealer does for dispatching an incoming call.
 
         :param procedure: The procedure to match.
-        :type procedure: unicode
+        :type procedure: str
 
         :returns: The best matching registration or ``None``.
         :rtype: obj or None
@@ -430,7 +631,7 @@ class RouterServiceSession(ApplicationSession):
         This essentially models what a broker does for dispatching an incoming publication.
 
         :param topic: The topic to match.
-        :type topic: unicode
+        :type topic: str
 
         :returns: All matching subscriptions or ``None``.
         :rtype: obj or None
@@ -457,7 +658,7 @@ class RouterServiceSession(ApplicationSession):
         This essentially models what a dealer does when registering for a procedure.
 
         :param procedure: The procedure to lookup the registration for.
-        :type procedure: unicode
+        :type procedure: str
         :param options: Same options as when registering a procedure.
         :type options: dict or None
 
@@ -482,7 +683,7 @@ class RouterServiceSession(ApplicationSession):
         This essentially models what a broker does when subscribing for a topic.
 
         :param topic: The topic to lookup the subscription for.
-        :type topic: unicode
+        :type topic: str
         :param options: Same options as when subscribing to a topic.
         :type options: dict or None
 
@@ -494,7 +695,7 @@ class RouterServiceSession(ApplicationSession):
 
         subscription = self._router._broker._subscription_map.get_observation(topic, match)
 
-        if subscription and is_protected_uri(subscription.uri, details):
+        if subscription and not is_protected_uri(subscription.uri, details):
             return subscription.id
         else:
             return None
@@ -512,7 +713,13 @@ class RouterServiceSession(ApplicationSession):
         """
         registration = self._router._dealer._registration_map.get_observation_by_id(registration_id)
 
-        if registration and not is_protected_uri(registration.uri, details):
+        if registration:
+            if is_protected_uri(registration.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to list callees for protected URI "{}"'.format(registration.uri),
+                )
+
             session_ids = []
             for callee in registration.observers:
                 session_ids.append(callee._session_id)
@@ -536,7 +743,13 @@ class RouterServiceSession(ApplicationSession):
         """
         subscription = self._router._broker._subscription_map.get_observation_by_id(subscription_id)
 
-        if subscription and is_protected_uri(subscription.uri, details):
+        if subscription:
+            if is_protected_uri(subscription.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to list subscribers for protected URI "{}"'.format(subscription.uri),
+                )
+
             session_ids = []
             for subscriber in subscription.observers:
                 session_ids.append(subscriber._session_id)
@@ -560,7 +773,12 @@ class RouterServiceSession(ApplicationSession):
         """
         registration = self._router._dealer._registration_map.get_observation_by_id(registration_id)
 
-        if registration and not is_protected_uri(registration.uri, details):
+        if registration:
+            if is_protected_uri(registration.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to count callees for protected URI "{}"'.format(registration.uri),
+                )
             return len(registration.observers)
         else:
             raise ApplicationError(
@@ -581,7 +799,13 @@ class RouterServiceSession(ApplicationSession):
         """
         subscription = self._router._broker._subscription_map.get_observation_by_id(subscription_id)
 
-        if subscription and is_protected_uri(subscription.uri, details):
+        if subscription:
+            if is_protected_uri(subscription.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to count subscribers for protected URI "{}"'.format(subscription.uri),
+                )
+
             return len(subscription.observers)
         else:
             raise ApplicationError(
@@ -612,7 +836,13 @@ class RouterServiceSession(ApplicationSession):
 
         subscription = self._router._broker._subscription_map.get_observation_by_id(subscription_id)
 
-        if subscription and is_protected_uri(subscription.uri, details):
+        if subscription:
+            if is_protected_uri(subscription.uri, details):
+                raise ApplicationError(
+                    ApplicationError.NOT_AUTHORIZED,
+                    message=u'not authorized to retrieve event history for protected URI "{}"'.format(subscription.uri),
+                )
+
             events = self._router._broker._event_store.get_events(subscription_id, limit)
             if events is None:
                 # a return value of None in above signals that event history really
@@ -634,7 +864,7 @@ class RouterServiceSession(ApplicationSession):
         Describe a given URI or all URIs.
 
         :param uri: The URI to describe or ``None`` to retrieve all declarations.
-        :type uri: unicode
+        :type uri: str
 
         :returns: A list of WAMP schema declarations.
         :rtype: list
@@ -646,7 +876,7 @@ class RouterServiceSession(ApplicationSession):
         Declare metadata for a given URI.
 
         :param uri: The URI for which to declare metadata.
-        :type uri: unicode
+        :type uri: str
         :param schema: The WAMP schema declaration for
            the URI or `None` to remove any declarations for the URI.
         :type schema: dict

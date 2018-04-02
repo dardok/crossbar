@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -52,7 +52,7 @@ def get_module_path_and_mtime(m):
     :type m: obj
     """
     res = (None, None)
-    if m and hasattr(m, '__file__') and (m.__file__.endswith('.py') or m.__file__.endswith('.pyc')):
+    if m and getattr(m, '__file__', None) and (m.__file__.endswith('.py') or m.__file__.endswith('.pyc')):
         f = m.__file__
         if f.endswith('.pyc'):
             f = f[:-1]
@@ -77,7 +77,7 @@ class TrackingModuleReloader:
 
     log = make_logger()
 
-    def __init__(self, use_mtimes=True):
+    def __init__(self, use_mtimes=True, snapshot=True):
         """
 
         :param use_mtimes: If `True`, try to use file modification times to limit
@@ -85,7 +85,8 @@ class TrackingModuleReloader:
         :type use_mtimes: bool
         """
         self._use_mtimes = use_mtimes
-        self.snapshot()
+        if snapshot:
+            self.snapshot()
 
     def snapshot(self):
         """

@@ -62,7 +62,7 @@ There are examples using specific technologies:
 * [Django framework](https://github.com/crossbario/crossbarexamples/tree/master/django/realtimemonitor)
 * [ExpressJS](https://github.com/crossbario/crossbarexamples/tree/master/expressjs)
 
-There is also an entire [subsection for the IoT](https://github.com/crossbario/crossbarexamples/tree/master/iotcookbook), for which we also offer [documentation](http://crossbar.io/iotcookbook).
+There is also an entire [subsection for the IoT](https://github.com/crossbario/crossbarexamples/tree/master/iotcookbook), for which we also offer [documentation](http://crossbario.com/iotcookbook/).
 
 And, finally, there are [more demos](https://github.com/crossbario/crossbarexamples/tree/master/demos) in the vein of the votes app. These range from really old code (written for a precursor version of Crossbar.io - so beware not to take this as examples!) to newer stuff, illustrating some of the things you can do with Crossbar.io.
 
@@ -80,6 +80,6 @@ As you'll probably notice sooner or later, Crossbar.io is a work in progress. Co
 
 ## Additional Examples
 
-For historic reasons, the [Autobahn|Python repository](https://github.com/tavendo/AutobahnPython) also contains some examples for using WAMP. The most relevant to the general Crossbar.io user can be found in [this directory](https://github.com/tavendo/AutobahnPython/tree/master/examples/twisted/wamp). These are almost always for both Python and JavaScript (using Autobahn|JS).
+For historic reasons, the [Autobahn|Python repository](https://github.com/crossbario/autobahn-python) also contains some examples for using WAMP. The most relevant to the general Crossbar.io user can be found in [this directory](https://github.com/tavendo/AutobahnPython/tree/master/examples/twisted/wamp). These are almost always for both Python and JavaScript (using Autobahn|JS).
 
 Some of the instructions here still assume a basic router in Autobahn|Python which has since been removed, but in principle they should run with Crossbar.io. Chances to happen across an outdated example are higher here, however. Should you find such an example, then please file an issue (or fix it and send us a pull request).

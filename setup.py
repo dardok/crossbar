@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -46,16 +46,24 @@ with open('crossbar/__init__.py') as f:
     else:
         raise RuntimeError('could not read package version')
 
-# read requirements from requirements.txt
+# we read requirements from requirements*.txt files down below
 install_requires = []
 extras_require = {
-    'dev': [
-        'towncrier',
-        'tox',
-    ]
+    'dev': []
 }
 
-with open('requirements-in.txt') as f:
+
+# minimum, open-ended requirements
+reqs = 'requirements-min.txt'
+
+# pinned requirements
+#reqs = 'requirements-pinned.txt'
+
+# pinned & hashed requirements: we cannot use that here sadly,
+# as setuptools doesn't understand hashes ..
+# reqs = 'requirements.txt'
+
+with open(reqs) as f:
     for line in f.read().splitlines():
         line = line.strip()
         if not line.startswith('#'):
@@ -88,17 +96,18 @@ setup(
     version=version,
     description='Crossbar.io - The Unified Application Router',
     long_description=long_description,
-    author='Tavendo GmbH',
-    author_email='autobahnws@googlegroups.com',
+    author='Crossbar.io Technologies GmbH',
     url='http://crossbar.io/',
     platforms=('Any'),
     license="AGPL3",
     install_requires=install_requires,
     extras_require=extras_require,
     entry_points={
+        # CLI entry function
         'console_scripts': [
             'crossbar = crossbar.controller.cli:run'
-        ]},
+        ]
+    },
     packages=find_packages(),
     include_package_data=True,
     data_files=[('.', ['COPYRIGHT', 'LICENSE', 'LICENSE-FOR-API'])],
@@ -116,6 +125,7 @@ setup(
                  "Programming Language :: Python :: 3.3",
                  "Programming Language :: Python :: 3.4",
                  "Programming Language :: Python :: 3.5",
+                 "Programming Language :: Python :: 3.6",
                  "Programming Language :: Python :: Implementation :: CPython",
                  "Programming Language :: Python :: Implementation :: PyPy",
                  "Topic :: Internet",

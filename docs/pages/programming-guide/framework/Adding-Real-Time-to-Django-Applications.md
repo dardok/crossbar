@@ -3,7 +3,7 @@ toc: [Documentation, Programming Guide, Adding Real Time to Django Applications]
 
 # Adding Real-Time to Django Applications
 
-WAMP has a [lot of potential](http://tavendo.com/blog/post/is-crossbar-the-future-of-python-web-apps/), but it's asynchronous and most current Python Web stacks are synchronous.
+WAMP has a [lot of potential](http://crossbario.com/blog/Is-Crossbar-the-future-of-Web-apps/), but it's asynchronous and most current Python Web stacks are synchronous.
 
 Still, you may want to benefit from WAMP realtime notifications right now in your synchronous applications.
 
@@ -57,13 +57,9 @@ First steps
 
 Our goal is to have a little WAMP monitoring client that we run on each machine we wish to monitor. It will retrieve CPU, RAM and disk usage every X seconds and then publish this data using WAMP.
 
-![Django/Crossbar.io Application Architecture](/static/img/docs/django/architecture.png)
-
 The client will talk to a server with a Django Website containing a model for each monitored machine, with values to say whether we are interested in the CPU, the RAM or the disk usage, and the currently set publishing interval for the data.
 
 A web page displays all readings for all machines in real time. When we change a model in the Django admin, the page reflects the change immediately.
-
-![Django Real-time Dashboard](/static/img/docs/django/dashboard.gif)
 
 So, we will need Django
 
@@ -77,7 +73,7 @@ requests
 pip install requests
 ```
 
-and [psutil](pythonhosted.org/psutil/)
+and [psutil](http://pythonhosted.org/psutil/)
 
 "psutil" is the Python lib which will enable us to retrieve all the values for the RAM, the disk and the CPU. It uses C extensions, so you'll need a compiler and Python headers. Under Ubuntu, you'll need to do:
 
@@ -103,7 +99,7 @@ Then you can
 pip install psutil
 ```
 
-At last, we will need to [install Crossbar.io](http://crossbar.io/docs/Local-Installation/). The basic install can be done by doing
+At last, we will need to [install Crossbar.io](/docs/Installation/). The basic install can be done by doing
 
 ```sh
 pip install crossbar
@@ -133,8 +129,10 @@ The monitoring front end is just a single page. Since this article is framework 
         Here I'm assuming we are using a browser with Websocket support.
         It's possible to fall back to flash or long poll, but that
         would require additional dependencies.
+
+        library can be found at https://github.com/crossbario/autobahn-js-built
     -->
-    <script src="https://autobahn.s3.amazonaws.com/autobahnjs/latest/autobahn.min.jgz"
+    <script src="autobahn.min.jgz"
            type="text/javascript"></script>
 
 

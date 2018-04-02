@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -32,6 +32,7 @@ from __future__ import absolute_import, division, print_function
 
 import six
 import txaio
+import uuid
 
 from txaio import make_logger
 
@@ -81,10 +82,12 @@ class Router(object):
 
         :param factory: The router factory this router was created by.
         :type factory: Object that implements :class:`autobahn.wamp.interfaces.IRouterFactory`..
+
         :param realm: The realm this router is working for.
         :type realm: str
+
         :param options: Router options.
-        :type options: Instance of :class:`autobahn.wamp.types.RouterOptions`.
+        :type options: Instance of :class:`crossbar.router.RouterOptions`.
         """
         self._factory = factory
         self._options = options or RouterOptions()
@@ -98,14 +101,29 @@ class Router(object):
 
         # map: session_id -> session
         self._session_id_to_session = {}
+        # map: authid -> set(session)
+        self._authid_to_sessions = {}
+        # map: authrole -> set(session)
+        self._authrole_to_sessions = {}
 
-        self._broker = self.broker(self, self._options)
-        self._dealer = self.dealer(self, self._options)
+        self._broker = self.broker(self, factory._reactor, self._options)
+        self._dealer = self.dealer(self, factory._reactor, self._options)
         self._attached = 0
 
         self._roles = {
             u'trusted': RouterTrustedRole(self, u'trusted')
         }
+
+        self._is_traced = self._factory._worker and \
+            hasattr(self._factory._worker, '_maybe_trace_rx_msg') and \
+            hasattr(self._factory._worker, '_maybe_trace_tx_msg')
+
+    @property
+    def is_traced(self):
+        return self._is_traced
+
+    def new_correlation_id(self):
+        return six.text_type(uuid.uuid4())
 
     def attach(self, session):
         """
@@ -127,7 +145,61 @@ class Router(object):
 
         return {u'broker': self._broker._role_features, u'dealer': self._dealer._role_features}
 
-    def detach(self, session):
+    def _session_joined(self, session, details):
+        """
+        Internal helper.
+        """
+        try:
+            self._authrole_to_sessions[details['authrole']].add(session)
+        except KeyError:
+            self._authrole_to_sessions[details['authrole']] = set([session])
+
+        try:
+            self._authid_to_sessions[details['authid']].add(session)
+        except KeyError:
+            self._authid_to_sessions[details['authid']] = set([session])
+
+        # log session details, but skip Crossbar.io internal sessions
+        if self.realm != u'crossbar':
+            self.log.info(
+                'session "{session_id}" joined realm "{realm}"',
+                session_id=details[u'session'],
+                realm=self.realm,
+            )
+            self.log.debug('{details}', details=details)
+
+    def _session_left(self, session, details):
+        """
+        Internal helper.
+        """
+        self._authid_to_sessions[details['authid']].discard(session)
+        if not self._authid_to_sessions[details['authid']]:
+            del self._authid_to_sessions[details['authid']]
+        self._authrole_to_sessions[details['authrole']].discard(session)
+
+        # log session details, but skip Crossbar.io internal sessions
+        if self.realm != u'crossbar':
+            self.log.info(
+                'session "{session_id}" left realm "{realm}"',
+                session_id=details[u'session'],
+                realm=self.realm,
+            )
+            self.log.debug('{details}', details=details)
+
+    def detach(self, session=None):
+        detached_session_ids = []
+        if session is None:
+            # detach all sessions from router
+            for session in list(self._session_id_to_session.values()):
+                self._detach(session)
+                detached_session_ids.append(session._session_id)
+        else:
+            # detach single session from router
+            self._detach(session)
+            detached_session_ids.append(session._session_id)
+        return detached_session_ids
+
+    def _detach(self, session):
         """
         Implements :func:`autobahn.wamp.interfaces.IRouter.detach`
         """
@@ -144,6 +216,8 @@ class Router(object):
         if not self._attached:
             self._factory.onLastDetach(self)
 
+        return session._session_id
+
     def _check_trace(self, session, msg):
         if not self._trace_traffic:
             return False
@@ -156,7 +230,14 @@ class Router(object):
     def send(self, session, msg):
         if self._check_trace(session, msg):
             self.log.info("<<TX<< {msg}", msg=msg)
-        session._transport.send(msg)
+
+        if session._transport:
+            session._transport.send(msg)
+
+            if self._is_traced:
+                self._factory._worker._maybe_trace_tx_msg(session, msg)
+        else:
+            self.log.warn('skip sending msg - transport already closed')
 
     def process(self, session, msg):
         """
@@ -165,39 +246,48 @@ class Router(object):
         if self._check_trace(session, msg):
             self.log.info(">>RX>> {msg}", msg=msg)
 
-        # Broker
-        #
-        if isinstance(msg, message.Publish):
-            self._broker.processPublish(session, msg)
+        try:
+            # Broker
+            #
+            if isinstance(msg, message.Publish):
+                self._broker.processPublish(session, msg)
 
-        elif isinstance(msg, message.Subscribe):
-            self._broker.processSubscribe(session, msg)
+            elif isinstance(msg, message.Subscribe):
+                self._broker.processSubscribe(session, msg)
 
-        elif isinstance(msg, message.Unsubscribe):
-            self._broker.processUnsubscribe(session, msg)
+            elif isinstance(msg, message.Unsubscribe):
+                self._broker.processUnsubscribe(session, msg)
 
-        # Dealer
-        #
-        elif isinstance(msg, message.Register):
-            self._dealer.processRegister(session, msg)
+            elif isinstance(msg, message.EventReceived):
+                self._broker.processEventReceived(session, msg)
 
-        elif isinstance(msg, message.Unregister):
-            self._dealer.processUnregister(session, msg)
+            # Dealer
+            #
+            elif isinstance(msg, message.Register):
+                self._dealer.processRegister(session, msg)
 
-        elif isinstance(msg, message.Call):
-            self._dealer.processCall(session, msg)
+            elif isinstance(msg, message.Unregister):
+                self._dealer.processUnregister(session, msg)
 
-        elif isinstance(msg, message.Cancel):
-            self._dealer.processCancel(session, msg)
+            elif isinstance(msg, message.Call):
+                self._dealer.processCall(session, msg)
 
-        elif isinstance(msg, message.Yield):
-            self._dealer.processYield(session, msg)
+            elif isinstance(msg, message.Cancel):
+                self._dealer.processCancel(session, msg)
 
-        elif isinstance(msg, message.Error) and msg.request_type == message.Invocation.MESSAGE_TYPE:
-            self._dealer.processInvocationError(session, msg)
+            elif isinstance(msg, message.Yield):
+                self._dealer.processYield(session, msg)
 
-        else:
-            raise ProtocolError("Unexpected message {0}".format(msg.__class__))
+            elif isinstance(msg, message.Error) and msg.request_type == message.Invocation.MESSAGE_TYPE:
+                self._dealer.processInvocationError(session, msg)
+
+            else:
+                raise ProtocolError("Unexpected message {0}".format(msg.__class__))
+        except ProtocolError:
+            raise
+        except:
+            self.log.error('INTERNAL ERROR in router incoming message processing')
+            self.log.failure()
 
     def has_role(self, uri):
         """
@@ -247,7 +337,7 @@ class Router(object):
         else:
             return False
 
-    def authorize(self, session, uri, action):
+    def authorize(self, session, uri, action, options):
         """
         Authorizes a session for an action on an URI.
 
@@ -263,7 +353,7 @@ class Router(object):
         if role in self._roles:
             # the authorizer procedure of the role which we will call ..
             authorize = self._roles[role].authorize
-            d = txaio.as_future(authorize, session, uri, action)
+            d = txaio.as_future(authorize, session, uri, action, options)
         else:
             # normally, the role should exist on the router (and hence we should not arrive
             # here), but the role might have been dynamically removed - and anyway, safety first!
@@ -314,15 +404,20 @@ class RouterFactory(object):
     The router class this factory will create router instances from.
     """
 
-    def __init__(self, options=None):
+    def __init__(self, node_id, worker, options=None):
         """
 
         :param options: Default router options.
-        :type options: Instance of :class:`autobahn.wamp.types.RouterOptions`.
+        :type options: Instance of :class:`crossbar.router.RouterOptions`.
         """
+        self._node_id = node_id
+        self._worker = worker
         self._routers = {}
         self._options = options or RouterOptions(uri_check=RouterOptions.URI_CHECK_LOOSE)
         self._auto_create_realms = False
+        # XXX this should get passed in from .. somewhere
+        from twisted.internet import reactor
+        self._reactor = reactor
 
     def get(self, realm):
         """
@@ -387,18 +482,37 @@ class RouterFactory(object):
 
         # now create a router for the realm
         #
-        router = Router(self, realm, self._options, store=store)
+        options = RouterOptions(
+            uri_check=self._options.uri_check,
+            event_dispatching_chunk_size=self._options.event_dispatching_chunk_size,
+        )
+        for arg in ['uri_check', 'event_dispatching_chunk_size']:
+            if arg in realm.config.get('options', {}):
+                setattr(options, arg, realm.config['options'][arg])
+
+        router = Router(self, realm, options, store=store)
+
         self._routers[uri] = router
         self.log.debug("Router created for realm '{uri}'", uri=uri)
 
         return router
 
     def stop_realm(self, realm):
-        self.log.debug("CrossbarRouterFactory.stop_realm(realm = {realm})",
+        self.log.debug('CrossbarRouterFactory.stop_realm(realm="{realm}")',
                        realm=realm)
 
+        assert(type(realm) == six.text_type)
+
+        if realm not in self._routers:
+            raise Exception('no router started for realm "{}"'.format(realm))
+
+        router = self._routers[realm]
+        detached_sessions = router.detach()
+
+        return detached_sessions
+
     def add_role(self, realm, config):
-        self.log.debug("CrossbarRouterFactory.add_role(realm = {realm}, config = {config})",
+        self.log.debug('CrossbarRouterFactory.add_role(realm="{realm}", config={config})',
                        realm=realm, config=config)
 
         assert(type(realm) == six.text_type)
@@ -418,8 +532,30 @@ class RouterFactory(object):
         router.add_role(role)
 
     def drop_role(self, realm, role):
-        self.log.debug("CrossbarRouterFactory.drop_role(realm = {realm}, role = {role})",
+        """
+        Drop a role.
+
+        :param realm: The name of the realm to drop.
+        :type realm: str
+        :param role: The URI of the role (on the realm) to drop.
+        :type role: str
+        """
+        self.log.debug('CrossbarRouterFactory.drop_role(realm="{realm}", role={role})',
                        realm=realm, role=role)
+
+        assert(type(realm) == six.text_type)
+        assert(type(role) == six.text_type)
+
+        if realm not in self._routers:
+            raise Exception('no router started for realm "{}"'.format(realm))
+
+        router = self._routers[realm]
+
+        if role not in router._roles:
+            raise Exception('no role "{}" started on router for realm "{}"'.format(role, realm))
+
+        role = router._roles[role]
+        router.drop_role(role)
 
     def auto_start_realm(self, realm):
         raise Exception("realm auto-activation (realm '{}') not yet implemented".format(realm))

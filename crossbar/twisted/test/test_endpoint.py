@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -35,7 +35,8 @@ import shutil
 
 from uuid import uuid4
 
-from twisted.internet.endpoints import UNIXServerEndpoint
+from twisted.internet.endpoints import UNIXServerEndpoint, TCP4ServerEndpoint
+from twisted.internet.endpoints import TCP4ClientEndpoint
 from twisted.internet.selectreactor import SelectReactor
 from twisted.internet.protocol import Factory
 from twisted.protocols.wire import Echo
@@ -43,6 +44,7 @@ from twisted.python.runtime import platform
 
 from crossbar.test import TestCase
 from crossbar.twisted.endpoint import create_listening_endpoint_from_config
+from crossbar.twisted.endpoint import create_connecting_endpoint_from_config
 
 from txaio import make_logger
 
@@ -147,3 +149,23 @@ class ListeningEndpointTests(TestCase):
         _ = "Cannot run as root"
         test_unix_already_listening_cant_delete.skip = _
         del _
+
+    def test_twisted_client(self):
+        reactor = SelectReactor()
+        config = {
+            "type": "twisted",
+            "client_string": "tcp:host=127.0.0.1:port=9876",
+        }
+
+        endpoint = create_connecting_endpoint_from_config(config, self.cbdir, reactor, self.log)
+        self.assertTrue(isinstance(endpoint, TCP4ClientEndpoint))
+
+    def test_twisted_server(self):
+        reactor = SelectReactor()
+        config = {
+            "type": "twisted",
+            "server_string": "tcp:9876:interface=127.0.0.1",
+        }
+
+        endpoint = create_listening_endpoint_from_config(config, self.cbdir, reactor, self.log)
+        self.assertTrue(isinstance(endpoint, TCP4ServerEndpoint))

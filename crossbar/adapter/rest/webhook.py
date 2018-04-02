@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -60,15 +60,25 @@ class WebhookResource(_CommonResource):
         publish_options = PublishOptions(acknowledge=True)
 
         def _succ(result):
+            response_text = self._options.get("success_response", u"OK").encode('utf8')
             return self._complete_request(
-                request, 202, b"OK", reason="Successfully sent webhook from {ip} to {topic}",
-                topic=topic, ip=request.getClientIP(), log_category="AR201")
+                request, 202, response_text,
+                reason="Successfully sent webhook from {ip} to {topic}",
+                topic=topic,
+                ip=request.getClientIP(),
+                log_category="AR201",
+            )
 
         def _err(result):
+            response_text = self._options.get("error_response", u"NOT OK").encode('utf8')
             return self._fail_request(
                 request, 500, "Unable to send webhook from {ip} to {topic}",
-                topic=topic, ip=request.getClientIP(), body=b"NOT OK",
-                log_failure=result, log_category="AR457")
+                topic=topic,
+                ip=request.getClientIP(),
+                body=response_text,
+                log_failure=result,
+                log_category="AR457",
+            )
 
         d = self._session.publish(topic,
                                   json.loads(json.dumps(message)),

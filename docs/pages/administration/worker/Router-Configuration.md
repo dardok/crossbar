@@ -25,10 +25,7 @@ A *Router* is configured as a *Worker*, more precisely a *Native Worker*, proces
          ],
          "components": [
             // app components running side-by-side with this router
-         ],
-         "manhole": {
-            // debugging access
-         }
+         ]
       }
    ]
 }
@@ -45,10 +42,6 @@ For configuration of `realms`, `transports` and `components`, have a look here
 * [[Router Transports]]
 * [[Router Components]]
 
-For the configuration of `manhole`, see
-
-* [[Manhole]]
-
 
 ## Configuration
 
@@ -57,7 +50,6 @@ parameter | description
 **`id`** | Optional router ID (default: `"router<N>"`)
 **`type`** | Must be `"router"`.
 **`options`** | Please see [Native Worker Options](Native Worker Options).
-**`manhole`** | Please see [Manhole](Manhole).
 **`realms`** | Please see [Router Realms](Router Realms).
 **`transports`** | Please see [Router Transports](Router Transports).
 **`components`** | A list of components. Please see below.
@@ -74,16 +66,3 @@ parameter | description
 **`references`** | Please see below.
 **`classname`** | The fully qualified Python classname to use.
 **`extra`** | Arbitrary custom data forwarded to the class ctonstructor.
-
-Another option for Router components are **WAMPlets**:
-
-parameter | description
----|---
-**`id`** | Optional component ID (default: `"component<N>"`)
-**`type`** | Must be `"wamplet"`.
-**`realm`** | The realm to join with the component.
-**`role`** | The atuhrole under which to attach the component.
-**`references`** | Please see below.
-**`package`** | The name of the package to look for.
-**`entrypoint`** | The entrypoint within packages to look at.
-**`extra`** | Arbitrary custom data forwarded to the class constructor.

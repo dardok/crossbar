@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -37,21 +37,18 @@ import jinja2
 import signal
 
 from twisted.internet.error import ReactorNotRunning
-from twisted.internet.defer import DeferredList, inlineCallbacks
+from twisted.internet.defer import inlineCallbacks
 
 from autobahn.util import utcnow
 from autobahn.wamp.exception import ApplicationError
-from autobahn.wamp.types import PublishOptions, RegisterOptions
+from autobahn.wamp.types import PublishOptions
+from autobahn import wamp
 
 from txaio import make_logger
 
 from crossbar.common.reloader import TrackingModuleReloader
 from crossbar.common.process import NativeProcessSession
 from crossbar.common.profiler import PROFILERS
-from crossbar.common.processinfo import _HAS_PSUTIL
-
-if _HAS_PSUTIL:
-    import psutil
 
 __all__ = ('NativeWorkerSession',)
 
@@ -72,12 +69,13 @@ class NativeWorkerSession(NativeProcessSession):
         """
         Called when the worker has connected to the node's management router.
         """
+        self._node_id = self.config.extra.node
         self._worker_id = self.config.extra.worker
-        self._uri_prefix = 'crossbar.worker.{}'.format(self._worker_id)
+        self._uri_prefix = u'crossbar.worker.{}'.format(self._worker_id)
 
         NativeProcessSession.onConnect(self, False)
 
-        self._module_tracker = TrackingModuleReloader()
+        self._module_tracker = TrackingModuleReloader(snapshot=False)
 
         self._profiles = {}
 
@@ -99,35 +97,7 @@ class NativeWorkerSession(NativeProcessSession):
         Called when worker process has joined the node's management realm.
         """
         yield NativeProcessSession.onJoin(self, details)
-
-        procs = [
-            # orderly shutdown worker "from inside"
-            'shutdown',
-
-            # CPU affinity for this worker process
-            'get_cpu_count',
-            'get_cpu_affinity',
-            'set_cpu_affinity',
-
-            # PYTHONPATH used for this worker
-            'get_pythonpath',
-            'add_pythonpath',
-
-            # profiling control
-            'get_profilers',
-            'start_profiler',
-            'get_profile',
-        ]
-
-        dl = []
-        for proc in procs:
-            uri = '{}.{}'.format(self._uri_prefix, proc)
-            self.log.debug("Registering management API procedure {proc}", proc=uri)
-            dl.append(self.register(getattr(self, proc), uri, options=RegisterOptions(details_arg='details')))
-
-        regs = yield DeferredList(dl)
-
-        self.log.debug("Registered {cnt} management API procedures", cnt=len(regs))
+        # above upcall registers all our "@wamp.register(None)" methods
 
         # setup SIGTERM handler to orderly shutdown the worker
         def shutdown(sig, frame):
@@ -170,6 +140,7 @@ class NativeWorkerSession(NativeProcessSession):
         self.log.debug("Worker '{worker}' running as PID {pid}",
                        worker=self.config.extra.worker, pid=os.getpid())
 
+    @wamp.register(None)
     @inlineCallbacks
     def shutdown(self, details=None):
         """
@@ -202,6 +173,15 @@ class NativeWorkerSession(NativeProcessSession):
         #
         self._reactor.callLater(0, self.leave)
 
+    @wamp.register(None)
+    def set_node_id(self, node_id, details=None):
+        self._node_id = node_id
+
+    @wamp.register(None)
+    def get_node_id(self, details=None):
+        return self._node_id
+
+    @wamp.register(None)
     def get_profilers(self, details=None):
         """
         Registered under: ``crossbar.worker.<worker_id>.get_profilers``
@@ -210,12 +190,14 @@ class NativeWorkerSession(NativeProcessSession):
 
         :param details: WAMP call details (auto-filled by WAMP).
         :type details: obj
+
         :returns: A list of profilers.
         :rtype: list of unicode
         """
         return [p.marshal() for p in PROFILERS.items()]
 
-    def start_profiler(self, profiler, runtime=10, async=True, details=None):
+    @wamp.register(None)
+    def start_profiler(self, profiler=u'vmprof', runtime=10, async=True, details=None):
         """
         Registered under: ``crossbar.worker.<worker_id>.start_profiler``
 
@@ -223,13 +205,17 @@ class NativeWorkerSession(NativeProcessSession):
         queried later.
 
         :param profiler: The profiler to start, e.g. ``vmprof``.
-        :type profiler: unicode
+        :type profiler: str
+
         :param runtime: Profiling duration in seconds.
         :type runtime: float
+
         :param async: Flag to turn on/off asynchronous mode.
         :type async: bool
+
         :param details: WAMP call details (auto-filled by WAMP).
         :type details: obj
+
         :returns: If running in synchronous mode, the profiling result. Else
             a profile ID is returned which later can be used to retrieve the profile.
         :rtype: dict or int
@@ -253,15 +239,17 @@ class NativeWorkerSession(NativeProcessSession):
         else:
             publish_options = PublishOptions(exclude=details.caller)
 
+        profile_started = {
+            u'id': profile_id,
+            u'who': details.caller,
+            u'profiler': profiler,
+            u'runtime': runtime,
+            u'async': async,
+        }
+
         self.publish(
             on_profile_started,
-            {
-                u'id': profile_id,
-                u'who': details.caller,
-                u'profiler': profiler,
-                u'runtime': runtime,
-                u'async': async,
-            },
+            profile_started,
             options=publish_options
         )
 
@@ -305,12 +293,13 @@ class NativeWorkerSession(NativeProcessSession):
         if async:
             # if running in async mode, immediately return the ID under
             # which the profile can be retrieved later (when it is finished)
-            return profile_id
+            return profile_started
         else:
             # if running in sync mode, return only when the profiling was
             # actually finished - and return the complete profile
             return profile_finished
 
+    @wamp.register(None)
     def get_profile(self, profile_id, details=None):
         """
         Get a profile previously produced by a profiler run.
@@ -326,125 +315,7 @@ class NativeWorkerSession(NativeProcessSession):
         else:
             raise ApplicationError(u'crossbar.error.no_such_object', 'no profile with ID {} saved'.format(profile_id))
 
-    def get_cpu_count(self, logical=True):
-        """
-        Returns the CPU core count on the machine this process is running on.
-
-        **Usage:**
-
-        This procedure is registered under
-
-        * ``crossbar.worker.<worker_id>.get_cpu_count``
-
-        **Errors:**
-
-        The procedure may raise the following errors:
-
-        * ``crossbar.error.feature_unavailable`` - the required support packages are not installed
-
-        :param logical: If enabled (default), include logical CPU cores ("Hyperthreading"),
-            else only count physical CPU cores.
-        :type logical: bool
-        :returns: The number of CPU cores.
-        :rtype: int
-        """
-        if not _HAS_PSUTIL:
-            emsg = "unable to get CPU count: required package 'psutil' is not installed"
-            self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
-
-        return psutil.cpu_count(logical=logical)
-
-    def get_cpu_affinity(self, details=None):
-        """
-        Get CPU affinity of this process.
-
-        **Usage:**
-
-        This procedure is registered under
-
-        * ``crossbar.worker.<worker_id>.get_cpu_affinity``
-
-        **Errors:**
-
-        The procedure may raise the following errors:
-
-        * ``crossbar.error.feature_unavailable`` - the required support packages are not installed
-        * ``crossbar.error.runtime_error`` - the CPU affinity could not be determined for some reason
-
-        :returns: List of CPU IDs the process affinity is set to.
-        :rtype: list of int
-        """
-        if not _HAS_PSUTIL:
-            emsg = "unable to get CPU affinity: required package 'psutil' is not installed"
-            self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
-
-        try:
-            p = psutil.Process(os.getpid())
-            current_affinity = p.cpu_affinity()
-        except Exception as e:
-            emsg = "Could not get CPU affinity: {}".format(e)
-            self.log.failure(emsg)
-            raise ApplicationError(u"crossbar.error.runtime_error", emsg)
-        else:
-            return current_affinity
-
-    def set_cpu_affinity(self, cpus, details=None):
-        """
-        Set CPU affinity of this process.
-
-        **Usage:**
-
-        This procedure is registered under
-
-        * ``crossbar.worker.<worker_id>.set_cpu_affinity``
-
-        **Errors:**
-
-        The procedure may raise the following errors:
-
-        * ``crossbar.error.feature_unavailable`` - the required support packages are not installed
-
-        **Events:**
-
-        When the CPU affinity has been successfully set, an event is published to
-
-        * ``crossbar.node.{}.worker.{}.on_cpu_affinity_set``
-
-        :param cpus: List of CPU IDs to set process affinity to. Each CPU ID must be
-            from the list `[0 .. N_CPUs]`, where N_CPUs can be retrieved via
-            ``crossbar.worker.<worker_id>.get_cpu_count``.
-        :type cpus: list of int
-        """
-        if not _HAS_PSUTIL:
-            emsg = "Unable to set CPU affinity: required package 'psutil' is not installed"
-            self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
-
-        try:
-            p = psutil.Process(os.getpid())
-            p.cpu_affinity(cpus)
-            new_affinity = p.cpu_affinity()
-        except Exception as e:
-            emsg = "Could not set CPU affinity: {}".format(e)
-            self.log.failure(emsg)
-            raise ApplicationError(u"crossbar.error.runtime_error", emsg)
-        else:
-
-            # publish info to all but the caller ..
-            #
-            cpu_affinity_set_topic = u'{}.on_cpu_affinity_set'.format(self._uri_prefix)
-            cpu_affinity_set_info = {
-                u'affinity': new_affinity,
-                u'who': details.caller
-            }
-            self.publish(cpu_affinity_set_topic, cpu_affinity_set_info, options=PublishOptions(exclude=details.caller))
-
-            # .. and return info directly to caller
-            #
-            return new_affinity
-
+    @wamp.register(None)
     def get_pythonpath(self, details=None):
         """
         Returns the current Python module search paths.
@@ -453,11 +324,12 @@ class NativeWorkerSession(NativeProcessSession):
         ``crossbar.worker.<worker_id>.get_pythonpath``.
 
         :returns: The current module search paths.
-        :rtype: list of unicode
+        :rtype: list of str
         """
         self.log.debug("{klass}.get_pythonpath", klass=self.__class__.__name__)
         return sys.path
 
+    @wamp.register(None)
     def add_pythonpath(self, paths, prepend=True, details=None):
         """
         Add paths to Python module search paths.
@@ -506,7 +378,7 @@ class NativeWorkerSession(NativeProcessSession):
 
         # publish event "on_pythonpath_add" to all but the caller
         #
-        topic = '{}.on_pythonpath_add'.format(self._uri_prefix)
+        topic = u'{}.on_pythonpath_add'.format(self._uri_prefix)
         res = {
             u'paths': sys.path,
             u'paths_added': paths_added,

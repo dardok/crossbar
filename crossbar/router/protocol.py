@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -33,14 +33,22 @@ from __future__ import absolute_import
 import os
 import traceback
 import crossbar
+import binascii
+
+from twisted import internet
 
 from autobahn.twisted import websocket
 from autobahn.twisted import rawsocket
 from autobahn.websocket.compress import PerMessageDeflateOffer, PerMessageDeflateOfferAccept
 
+# from autobahn.websocket.types import ConnectionAccept
+from autobahn.websocket.types import ConnectionDeny
+
 from txaio import make_logger
 
 from crossbar.router.cookiestore import CookieStoreMemoryBacked, CookieStoreFileBacked
+
+from crossbar.twisted.endpoint import create_connecting_endpoint_from_config
 
 log = make_logger()
 
@@ -114,49 +122,71 @@ def set_websocket_options(factory, options):
 
             params = c['compression']['deflate']
 
-            requestNoContextTakeover = params.get('request_no_context_takeover', False)
-            requestMaxWindowBits = params.get('request_max_window_bits', 0)
-            noContextTakeover = params.get('no_context_takeover', None)
-            windowBits = params.get('max_window_bits', None)
-            memLevel = params.get('memory_level', None)
+            request_no_context_takeover = params.get('request_no_context_takeover', False)
+            request_max_window_bits = params.get('request_max_window_bits', 0)
+            no_context_takeover = params.get('no_context_takeover', None)
+            window_bits = params.get('max_window_bits', None)
+            mem_level = params.get('memory_level', None)
 
             def accept(offers):
                 for offer in offers:
                     if isinstance(offer, PerMessageDeflateOffer):
-                        if (requestMaxWindowBits == 0 or offer.acceptMaxWindowBits) and \
-                           (not requestNoContextTakeover or offer.acceptNoContextTakeover):
+                        if (request_max_window_bits == 0 or offer.accept_max_window_bits) and \
+                           (not request_no_context_takeover or offer.accept_no_context_takeover):
                             return PerMessageDeflateOfferAccept(offer,
-                                                                requestMaxWindowBits=requestMaxWindowBits,
-                                                                requestNoContextTakeover=requestNoContextTakeover,
-                                                                noContextTakeover=noContextTakeover,
-                                                                windowBits=windowBits,
-                                                                memLevel=memLevel)
+                                                                request_max_window_bits=request_max_window_bits,
+                                                                request_no_context_takeover=request_no_context_takeover,
+                                                                no_context_takeover=no_context_takeover,
+                                                                window_bits=window_bits,
+                                                                mem_level=mem_level)
             per_msg_compression = accept
 
-    factory.setProtocolOptions(
-        versions=versions,
-        webStatus=c.get("enable_webstatus", True),
-        utf8validateIncoming=c.get("validate_utf8", True),
-        maskServerFrames=c.get("mask_server_frames", False),
-        requireMaskedClientFrames=c.get("require_masked_client_frames", True),
-        applyMask=c.get("apply_mask", True),
-        maxFramePayloadSize=c.get("max_frame_size", 0),
-        maxMessagePayloadSize=c.get("max_message_size", 0),
-        autoFragmentSize=c.get("auto_fragment_size", 0),
-        failByDrop=c.get("fail_by_drop", False),
-        echoCloseCodeReason=c.get("echo_close_codereason", False),
-        openHandshakeTimeout=openHandshakeTimeout,
-        closeHandshakeTimeout=closeHandshakeTimeout,
-        tcpNoDelay=c.get("tcp_nodelay", True),
-        autoPingInterval=autoPingInterval,
-        autoPingTimeout=autoPingTimeout,
-        autoPingSize=c.get("auto_ping_size", None),
-        serveFlashSocketPolicy=c.get("enable_flash_policy", None),
-        flashSocketPolicy=c.get("flash_policy", None),
-        allowedOrigins=c.get("allowed_origins", ["*"]),
-        allowNullOrigin=bool(c.get("allow_null_origin", True)),
-        perMessageCompressionAccept=per_msg_compression,
-    )
+    if factory.isServer:
+        factory.setProtocolOptions(
+            versions=versions,
+            webStatus=c.get("enable_webstatus", True),
+            utf8validateIncoming=c.get("validate_utf8", True),
+            maskServerFrames=c.get("mask_server_frames", False),
+            requireMaskedClientFrames=c.get("require_masked_client_frames", True),
+            applyMask=c.get("apply_mask", True),
+            maxFramePayloadSize=c.get("max_frame_size", 0),
+            maxMessagePayloadSize=c.get("max_message_size", 0),
+            autoFragmentSize=c.get("auto_fragment_size", 0),
+            failByDrop=c.get("fail_by_drop", False),
+            echoCloseCodeReason=c.get("echo_close_codereason", False),
+            openHandshakeTimeout=openHandshakeTimeout,
+            closeHandshakeTimeout=closeHandshakeTimeout,
+            tcpNoDelay=c.get("tcp_nodelay", True),
+            autoPingInterval=autoPingInterval,
+            autoPingTimeout=autoPingTimeout,
+            autoPingSize=c.get("auto_ping_size", None),
+            serveFlashSocketPolicy=c.get("enable_flash_policy", None),
+            flashSocketPolicy=c.get("flash_policy", None),
+            allowedOrigins=c.get("allowed_origins", ["*"]),
+            allowNullOrigin=bool(c.get("allow_null_origin", True)),
+            perMessageCompressionAccept=per_msg_compression,
+        )
+    else:
+        factory.setProtocolOptions(
+            version=None,
+            utf8validateIncoming=c.get("validate_utf8", True),
+            acceptMaskedServerFrames=c.get("accept_masked_server_frames", False),
+            maskClientFrames=c.get("mask_client_frames", True),
+            applyMask=c.get("apply_mask", True),
+            maxFramePayloadSize=c.get("max_frame_size", 0),
+            maxMessagePayloadSize=c.get("max_message_size", 0),
+            autoFragmentSize=c.get("auto_fragment_size", 0),
+            failByDrop=c.get("fail_by_drop", False),
+            echoCloseCodeReason=c.get("echo_close_codereason", False),
+            openHandshakeTimeout=openHandshakeTimeout,
+            closeHandshakeTimeout=closeHandshakeTimeout,
+            tcpNoDelay=c.get("tcp_nodelay", True),
+            autoPingInterval=autoPingInterval,
+            autoPingTimeout=autoPingTimeout,
+            autoPingSize=c.get("auto_ping_size", None),
+            perMessageCompressionOffers=None,
+            perMessageCompressionAccept=None,
+        )
 
 
 class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
@@ -206,6 +236,7 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
             self._authrole = None
             self._authrealm = None
             self._authmethod = None
+            self._authextra = None
             self._authprovider = None
 
             # cookie tracking and cookie-based authentication
@@ -237,14 +268,14 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
                 #
                 if 'auth' in self.factory._config and 'cookie' in self.factory._config['auth']:
 
-                    self._authid, self._authrole, self._authmethod, self._authrealm = self.factory._cookiestore.getAuth(self._cbtid)
+                    self._authid, self._authrole, self._authmethod, self._authrealm, self._authextra = self.factory._cookiestore.getAuth(self._cbtid)
 
                     if self._authid:
                         # there is a cookie set, and the cookie was previously successfully authenticated,
                         # so immediately authenticate the client using that information
                         self._authprovider = u'cookie'
-                        self.log.debug("Authenticated client via cookie cbtid={cbtid} as authid={authid}, authrole={authrole}, authmethod={authmethod}, authrealm={authrealm}",
-                                       cbtid=self._cbtid, authid=self._authid, authrole=self._authrole, authmethod=self._authmethod, authrealm=self._authrealm)
+                        self.log.debug("Authenticated client via cookie {cookiename}={cbtid} as authid={authid}, authrole={authrole}, authmethod={authmethod}, authrealm={authrealm}",
+                                       cookiename=self.factory._cookiestore._cookie_id_field, cbtid=self._cbtid, authid=self._authid, authrole=self._authrole, authmethod=self._authmethod, authrealm=self._authrealm)
                     else:
                         # there is a cookie set, but the cookie wasn't authenticated yet using a different auth method
                         self.log.debug("Cookie-based authentication enabled, but cookie isn't authenticated yet")
@@ -260,8 +291,23 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
                 u'type': 'websocket',
                 u'protocol': protocol,
                 u'peer': self.peer,
+
+                # all HTTP headers as received by the WebSocket client
                 u'http_headers_received': request.headers,
+
+                # only customer user headers (such as cookie)
                 u'http_headers_sent': headers,
+
+                # all HTTP response lines sent (verbatim, in order as sent)
+                # this will get filled in onOpen() from the HTTP response
+                # data that will be stored by AutobahnPython at the WebSocket
+                # protocol level (WebSocketServerProtocol)
+                # u'http_response_lines': None,
+
+                # WebSocket extensions in use .. will be filled in onOpen() - see below
+                u'websocket_extensions_in_use': None,
+
+                # Crossbar.io tracking ID (for cookie tracking)
                 u'cbtid': self._cbtid
             }
 
@@ -272,6 +318,21 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
 
         except Exception:
             traceback.print_exc()
+
+    def onOpen(self):
+        if False:
+            # this is little bit silly, we parse the complete response data into lines again
+            http_response_lines = []
+            for line in self.http_response_data.split('\r\n'):
+                line = line.strip()
+                if line:
+                    http_response_lines.append(line)
+            self._transport_info[u'http_response_lines'] = http_response_lines
+
+        # note the WebSocket extensions negotiated
+        self._transport_info[u'websocket_extensions_in_use'] = [e.__json__() for e in self.websocket_extensions_in_use]
+
+        return super(WampWebSocketServerProtocol, self).onOpen()
 
     def sendServerStatus(self, redirectUrl=None, redirectAfter=0):
         """
@@ -447,6 +508,7 @@ class WampRawSocketServerProtocol(rawsocket.WampRawSocketServerProtocol):
         self._authrealm = None
         self._authmethod = None
         self._authprovider = None
+        self._authextra = None
 
         # cookie tracking ID
         #
@@ -457,9 +519,13 @@ class WampRawSocketServerProtocol(rawsocket.WampRawSocketServerProtocol):
         #
         self._transport_info = {
             u'type': 'rawsocket',
-            u'protocol': None,  # FIXME
+            u'protocol': None,
             u'peer': self.peer
         }
+
+    def _on_handshake_complete(self):
+        self._transport_info[u'protocol'] = u'wamp.2.{}'.format(self._serializer.SERIALIZER_ID)
+        return rawsocket.WampRawSocketServerProtocol._on_handshake_complete(self)
 
     def lengthLimitExceeded(self, length):
         self.log.error("failing RawSocket connection - message length exceeded: message was {len} bytes, but current maximum is {maxlen} bytes",
@@ -629,3 +695,187 @@ class WampRawSocketClientFactory(rawsocket.WampRawSocketClientFactory):
             raise Exception("invalid WAMP serializer '{}'".format(serid))
 
         rawsocket.WampRawSocketClientFactory.__init__(self, factory, serializer)
+
+
+class WebSocketReverseProxyClientProtocol(websocket.WebSocketClientProtocol):
+
+    log = make_logger()
+
+    def onConnect(self, response):
+        self.log.debug('WebSocketReverseProxyClientProtocol.onConnect(response={response})',
+                       response=response)
+        # response={"peer": "tcp4:127.0.0.1:9000", "headers": {"server": "AutobahnPython/17.10.1", "upgrade": "WebSocket", "connection": "Upgrade", "sec-websocket-accept": "tJFVMTSzGypbxQb8GW1dK/QLMZQ="}, "version": 18, "protocol": null, "extensions": []}
+        try:
+            # accept = ConnectionAccept(subprotocol=response.protocol, headers=None)
+            headers = {}
+            accept = response.protocol, headers
+            self.backend_on_connect.callback(accept)
+        except:
+            self.log.failure()
+
+    def onOpen(self):
+        self.log.debug('WebSocketReverseProxyClientProtocol.onOpen()')
+        self.factory.frontend_protocol.onOpen()
+
+    def onMessage(self, payload, isBinary):
+        self.log.debug('WebSocketReverseProxyClientProtocol.onMessage(payload={payload}, isBinary={isBinary})',
+                       payload=u'{}..'.format((binascii.b2a_hex(payload).decode() if isBinary else payload.decode('utf8'))[:16]),
+                       isBinary=isBinary)
+        self.factory.frontend_protocol.sendMessage(payload, isBinary)
+
+    def onClose(self, wasClean, code, reason):
+        self.log.debug('WebSocketReverseProxyClientProtocol.onClose(wasClean={wasClean}, code={code}, reason={reason})',
+                       wasClean=wasClean, code=code, reason=reason)
+        code = 1000
+        self.factory.frontend_protocol.sendClose(code, reason)
+
+
+class WebSocketReverseProxyClientFactory(websocket.WebSocketClientFactory):
+
+    log = make_logger()
+
+    protocol = WebSocketReverseProxyClientProtocol
+
+    def __init__(self, *args, **kwargs):
+        self.frontend_protocol = kwargs.pop('frontend_protocol', None)
+        assert(self.frontend_protocol is not None)
+
+        frontend_request = kwargs.pop('frontend_request', None)
+        if frontend_request:
+            protocols = frontend_request.protocols
+            # headers = frontend_request.headers
+        else:
+            protocols = None
+            # headers = None
+
+        websocket.WebSocketClientFactory.__init__(self, *args, protocols=protocols, **kwargs)
+
+        # set WebSocket options
+        self.backend_config = self.frontend_protocol.backend_config
+        set_websocket_options(self, self.backend_config.get('options', {}))
+
+
+class WebSocketReverseProxyServerProtocol(websocket.WebSocketServerProtocol):
+    """
+    Server protocol to accept incoming (frontend) WebSocket connections and
+    forward traffic to a backend WebSocket server.
+
+    This protocol supports any WebSocket based subprotocol with text or
+    binary payload.
+
+    The WebSocket connection to the backend WebSocket server is configurable
+    on the factory for this protocol.
+    """
+
+    log = make_logger()
+
+    def onConnect(self, request):
+        """
+        Incoming (frontend) WebSocket connection accepted. Forward connect to
+        backend WebSocket server.
+        """
+        self.log.debug('WebSocketReverseProxyServerProtocol.onConnect(request={request})', request=request)
+
+        self.backend_config = self.factory.path_config['backend']
+
+        self.backend_factory = WebSocketReverseProxyClientFactory(frontend_protocol=self,
+                                                                  frontend_request=request,
+                                                                  url=self.backend_config.get('url', None))
+        self.backend_factory.noisy = False
+
+        self.backend_protocol = None
+
+        # create and connect client endpoint
+        #
+        endpoint = create_connecting_endpoint_from_config(self.backend_config[u'endpoint'],
+                                                          None,
+                                                          self.factory.reactor,
+                                                          self.log)
+
+        backend_on_connect = internet.defer.Deferred()
+
+        # now, actually connect the client
+        #
+        d = endpoint.connect(self.backend_factory)
+
+        def on_connect_success(proto):
+            self.log.debug('WebSocketReverseProxyServerProtocol.onConnect(..): connected')
+            proto.backend_on_connect = backend_on_connect
+            self.backend_protocol = proto
+
+        def on_connect_error(err):
+            deny = ConnectionDeny(ConnectionDeny.SERVICE_UNAVAILABLE, u'WebSocket reverse proxy backend not reachable')
+            backend_on_connect.errback(deny)
+
+        d.addCallbacks(on_connect_success, on_connect_error)
+
+        return backend_on_connect
+
+    def onOpen(self):
+        self.log.debug('WebSocketReverseProxyServerProtocol.onOpen()')
+
+    def onMessage(self, payload, isBinary):
+        if self.backend_protocol:
+            self.log.debug('WebSocketReverseProxyServerProtocol: forwarding WebSocket message from frontend connection to backend connection')
+            self.backend_protocol.sendMessage(payload, isBinary)
+        else:
+            self.log.warn('WebSocketReverseProxyServerProtocol: received WebSocket message on frontend connection while there is no backend connection! dropping WebSocket message')
+
+    def onClose(self, wasClean, code, reason):
+        if self.backend_protocol:
+            self.log.debug('WebSocketReverseProxyServerProtocol: forwarding close from frontend connection to backend connection')
+            code = 1000
+            self.backend_protocol.sendClose(code, reason)
+        else:
+            self.log.warn('WebSocketReverseProxyServerProtocol: received WebSocket close on frontend connection while there is no backend connection! dropping WebSocket close')
+
+
+class WebSocketReverseProxyServerFactory(websocket.WebSocketServerFactory):
+
+    """
+    Reverse WebSocket proxy factory.
+
+    This factory produces protocols that accept incoming WebSocket connections,
+    connect to a backend WebSocket server and forward WebSocket messages received
+    from both side to the other side.
+
+    Reverse WebSocket proxy factories are then given to WebSocketResource instances
+    in a Web transport resource tree.
+    """
+
+    protocol = WebSocketReverseProxyServerProtocol
+    log = make_logger()
+
+    def __init__(self, reactor, path_config):
+        """
+
+        :param path_config: The path configuration of the Web transport resource.
+        :type path_config: dict
+        """
+        self.reactor = reactor
+        self.path_config = path_config
+
+        url = path_config.get('url', None)
+
+        options = path_config.get('options', {})
+
+        showServerVersion = options.get('show_server_version', True)
+        if showServerVersion:
+            server = "Crossbar/{}".format(crossbar.__version__)
+        else:
+            server = "Crossbar"
+
+        externalPort = options.get('external_port', None)
+
+        protocols = None
+        headers = None
+
+        websocket.WebSocketServerFactory.__init__(self,
+                                                  reactor=reactor,
+                                                  url=url,
+                                                  protocols=protocols,
+                                                  server=server,
+                                                  headers=headers,
+                                                  externalPort=externalPort)
+        # set WebSocket options
+        set_websocket_options(self, options)

@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -155,12 +155,12 @@ class PendingAuth:
             return types.Deny(ApplicationError.NO_SUCH_REALM, message=u'no realm "{}" exists on this router'.format(self._realm))
 
         # role auto-activation: if role is not running on realm, maybe start it ..
-        if not self._router_factory[self._realm].has_role(self._authrole):
+        if self._authrole and not self._router_factory[self._realm].has_role(self._authrole):
             # FIXME: this can return a deferred!
             self._router_factory.auto_add_role(self._realm, self._authrole)
 
         # if role is not running on realm, bail out now!
-        if not self._router_factory[self._realm].has_role(self._authrole):
+        if self._authrole and not self._router_factory[self._realm].has_role(self._authrole):
             return types.Deny(ApplicationError.NO_SUCH_ROLE, message=u'realm "{}" has no role "{}"'.format(self._realm, self._authrole))
 
     def _init_dynamic_authenticator(self):
@@ -179,9 +179,14 @@ class PendingAuth:
         self._authenticator_session = self._router_factory.get(authenticator_realm)._realm.session
 
     def _marshal_dynamic_authenticator_error(self, err):
-        error = ApplicationError.AUTHENTICATION_FAILED
-        message = u'dynamic authenticator failed: {}'.format(err.value)
-        return types.Deny(error, message)
+        if isinstance(err.value, ApplicationError):
+            # forward the inner error URI and message (or coerce the first args item to str)
+            return types.Deny(err.value.error, u'{}'.format(err.value.args[0]))
+        else:
+            # wrap the error
+            error = ApplicationError.AUTHENTICATION_FAILED
+            message = u'dynamic authenticator failed: {}'.format(err.value)
+            return types.Deny(error, message)
 
     def _accept(self):
         return types.Accept(realm=self._realm,

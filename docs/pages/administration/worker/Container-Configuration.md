@@ -47,9 +47,11 @@ The worker itself has the options
 2. `options`: a dictionary of configuration options
 3. `components`: a list Python components to run in the container (*required*)
 
-`options` are those [shared by Native Workers](Native Worker Options)
+`options` are those [shared by Native Workers](Native Worker Options) as well as:
 
-For a `component`, the `type` is *required* and may be either `class` or `wamplet`.
+1. `shutdown`: `shutdown-manual` (the default) or `shutdown-on-last-worker-exit`
+
+For a `component`, the `type` is *required* and should be `class`.
 
 Both types share the following options:
 
@@ -61,11 +63,6 @@ Both types share the following options:
 For the type `class`, you need to set
 
 * `classname`: the Python WAMP application class, a module/classname of a class derived from `autobahn.twisted.wamp.ApplicationSession` (*required*)
-
-For the type `wamplet`, you need to set
-
-1. `package`: The name of the installed Python package (*required*)
-2. `entrypoint`: The name of the file within the package to execute (*required*)
 
 
 ## Failures
@@ -88,7 +85,6 @@ parameter | description
 **`id`** | Optional container ID (default: `"container<N>"`)
 **`type`** | Must be `"container"`.
 **`options`** | Please see [Native Worker Options](Native Worker Options).
-**`manhole`** | Please see [Manhole](Manhole).
 **`components`** | A list of components. Please see below.
 **`connections`** | Not yet implemented.
 
@@ -102,15 +98,3 @@ parameter | description
 **`transport`** | The configured connecting transport.
 **`classname`** | The fully qualified Python classname to use.
 **`extra`** | Arbitrary custom data forwarded to the class ctonstructor.
-
-Another option for Container components are **WAMPlets**:
-
-parameter | description
----|---
-**`id`** | Optional component ID (default: `"component<N>"`)
-**`type`** | Must be `"wamplet"`.
-**`realm`** | The realm to join with the component.
-**`transport`** | The configured connecting transport.
-**`package`** | The name of the package to look for.
-**`entrypoint`** | The entrypoint within packages to look at.
-**`extra`** | Arbitrary custom data forwarded to the class constructor.

@@ -1,9 +1,9 @@
 #####################################################################################
 #
-#  Copyright (C) Tavendo GmbH
+#  Copyright (c) Crossbar.io Technologies GmbH
 #
-#  Unless a separate license agreement exists between you and Tavendo GmbH (e.g. you
-#  have purchased a commercial license), the license terms below apply.
+#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
+#  you have purchased a commercial license), the license terms below apply.
 #
 #  Should you enter into a separate license agreement after having received a copy of
 #  this software, then the terms of such license agreement replace the terms below at
@@ -187,6 +187,71 @@ class CheckContainerTests(TestCase):
                       str(e.exception))
 
 
+class CheckEndpointTests(TestCase):
+    """
+    check_listening_endpoint and check_connecting_endpoint
+    """
+
+    def test_twisted_client_error(self):
+        config = {
+            "type": "twisted",
+            "client_string": 1000,
+        }
+
+        with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
+            checkconfig.check_connecting_endpoint(config)
+        self.assertTrue(
+            "in Twisted endpoint must be str" in str(ctx.exception)
+        )
+
+    def test_twisted_server_error(self):
+        config = {
+            "type": "twisted",
+            "server_string": 1000,
+        }
+
+        with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
+            checkconfig.check_listening_endpoint(config)
+        self.assertTrue(
+            "in Twisted endpoint must be str" in str(ctx.exception)
+        )
+
+    def test_twisted_server_missing_arg(self):
+        config = {
+            "type": "twisted"
+        }
+
+        with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
+            checkconfig.check_listening_endpoint(config)
+        self.assertTrue(
+            "mandatory attribute 'server_string'" in str(ctx.exception)
+        )
+
+    def test_twisted_client_missing_arg(self):
+        config = {
+            "type": "twisted"
+        }
+
+        with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
+            checkconfig.check_connecting_endpoint(config)
+        self.assertTrue(
+            "mandatory attribute 'client_string'" in str(ctx.exception)
+        )
+
+
+class CheckWebsocketTests(TestCase):
+
+    def test_tiny_timeout_auto_ping(self):
+        options = dict(auto_ping_timeout=12)
+
+        with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
+            checkconfig.check_websocket_options(options)
+
+        self.assertTrue(
+            "'auto_ping_timeout' is in milliseconds" in str(ctx.exception)
+        )
+
+
 class CheckRealmTests(TestCase):
     """
     Tests for check_router_realm, check_router_realm_role
@@ -348,4 +413,44 @@ class CheckRealmTests(TestCase):
         self.assertRaises(
             checkconfig.InvalidConfigException,
             checkconfig.check_router_realm, config_realm,
+        )
+
+
+class CheckOnion(TestCase):
+
+    def test_unknown_attr(self):
+        with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
+            checkconfig.check_listening_endpoint_onion({
+                u"type": u"onion",
+                u"foo": 42,
+            })
+        self.assertIn(
+            "unknown attribute",
+            str(ctx.exception)
+        )
+
+    def test_success(self):
+        checkconfig.check_listening_endpoint_onion({
+            u"type": u"onion",
+            u"private_key_file": u"something",
+            u"port": 1234,
+            u"tor_control_endpoint": {
+                u"type": u"unix",
+                u"path": u"/dev/null",
+            }
+        })
+
+    def test_port_wrong_type(self):
+        with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
+            checkconfig.check_listening_endpoint_onion({
+                u"type": u"onion",
+                u"port": u"1234",
+            })
+        self.assertIn(
+            "invalid type",
+            str(ctx.exception)
+        )
+        self.assertIn(
+            "encountered for attribute 'port'",
+            str(ctx.exception)
         )
