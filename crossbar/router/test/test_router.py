@@ -42,7 +42,7 @@ from autobahn.twisted.wamp import ApplicationSession
 
 from crossbar.router.router import RouterFactory
 from crossbar.router.session import RouterSessionFactory
-from crossbar.worker.router import RouterRealm
+from crossbar.worker.types import RouterRealm
 from crossbar.router.role import RouterRoleStaticAuth
 
 
@@ -60,7 +60,7 @@ class TestEmbeddedSessions(unittest.TestCase):
         self.router_factory = RouterFactory(None, None)
 
         # start a realm
-        self.router_factory.start_realm(RouterRealm(None, {u'name': u'realm1'}))
+        self.router_factory.start_realm(RouterRealm(None, None, {u'name': u'realm1'}))
 
         # allow everything
         default_permissions = {
@@ -181,7 +181,7 @@ class TestEmbeddedSessions(unittest.TestCase):
 
         session = TestSession(types.ComponentConfig(u'realm1'))
 
-        self.session_factory.add(session)
+        self.session_factory.add(session, self.router)
 
         return d
 
@@ -205,7 +205,7 @@ class TestEmbeddedSessions(unittest.TestCase):
         # in this test, we are just looking for onUserError to get
         # called so we don't need to patch the logger. this should
         # call onJoin, triggering our error
-        self.session_factory.add(session)
+        self.session_factory.add(session, self.router)
 
         # check we got the right log.failure() call
         self.assertTrue(len(errors) > 0, "expected onUserError call")
@@ -301,6 +301,6 @@ class TestEmbeddedSessions(unittest.TestCase):
 
         session = TestSession(types.ComponentConfig(u'realm1'))
 
-        self.session_factory.add(session)
+        self.session_factory.add(session, self.router)
 
         return d

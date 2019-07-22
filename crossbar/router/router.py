@@ -28,9 +28,8 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import, division, print_function
+from __future__ import absolute_import, division
 
-import six
 import txaio
 import uuid
 
@@ -40,7 +39,6 @@ from autobahn.wamp import message
 from autobahn.wamp.exception import ProtocolError
 
 from crossbar.router import RouterOptions
-from crossbar.router.realmstore import HAS_LMDB, LmdbRealmStore, MemoryRealmStore
 from crossbar.router.broker import Broker
 from crossbar.router.dealer import Dealer
 from crossbar.router.role import RouterRole, \
@@ -114,27 +112,68 @@ class Router(object):
             u'trusted': RouterTrustedRole(self, u'trusted')
         }
 
-        self._is_traced = self._factory._worker and \
-            hasattr(self._factory._worker, '_maybe_trace_rx_msg') and \
-            hasattr(self._factory._worker, '_maybe_trace_tx_msg')
+        # FIXME: this was previsouly just checking for existence of
+        # self._factory._worker._maybe_trace_tx_msg / _maybe_trace_rx_msg
+        self._is_traced = False
+
+        self.reset_stats()
+
+    def stats(self, reset=False):
+        """
+        Get WAMP message routing statistics.
+
+        :param reset: Automatically reset statistics before returning.
+        :type reset: bool
+
+        :return: Dict with number of WAMP messages processed in total by the
+            router, indexed by sent/received and by WAMP message type.
+        """
+        stats = {
+            # number of WAMP authentication roles defined on this realm
+            'roles': len(self._roles),
+
+            # number of WAMP sessions currently joined on this realm
+            'sessions': self._attached,
+
+            # WAMP message routing statistics
+            'messages': self._message_stats
+        }
+        if reset:
+            self.reset_stats()
+        return stats
+
+    def reset_stats(self):
+        """
+        Reset WAMP message routing statistics.
+        """
+        self._message_stats = {
+            # number of WAMP messages (by type) sent on total by the router
+            'sent': {},
+
+            # number of WAMP messages (by type) received in total by the router
+            'received': {},
+        }
 
     @property
     def is_traced(self):
         return self._is_traced
 
     def new_correlation_id(self):
-        return six.text_type(uuid.uuid4())
+        return str(uuid.uuid4())
+
+    def is_attached(self, session):
+        return session._session_id in self._session_id_to_session
 
     def attach(self, session):
         """
         Implements :func:`autobahn.wamp.interfaces.IRouter.attach`
         """
+        self.log.info('{klass}.attach(session={session})',
+                      klass=self.__class__.__name__,
+                      session=session._session_id if session else None)
+
         if session._session_id not in self._session_id_to_session:
-            if _is_client_session(session):
-                self._session_id_to_session[session._session_id] = session
-            else:
-                self.log.debug("attaching non-client session {session}",
-                               session=session)
+            self._session_id_to_session[session._session_id] = session
         else:
             raise Exception("session with ID {} already attached".format(session._session_id))
 
@@ -143,50 +182,65 @@ class Router(object):
 
         self._attached += 1
 
+        self.log.info('{klass}.attach(session={session}): attached session {session} to router realm "{realm}"',
+                      klass=self.__class__.__name__,
+                      session=session._session_id if session else None,
+                      realm=self.realm)
+
         return {u'broker': self._broker._role_features, u'dealer': self._dealer._role_features}
 
-    def _session_joined(self, session, details):
+    def _session_joined(self, session, session_details):
         """
         Internal helper.
         """
         try:
-            self._authrole_to_sessions[details['authrole']].add(session)
+            self._authrole_to_sessions[session_details.authrole].add(session)
         except KeyError:
-            self._authrole_to_sessions[details['authrole']] = set([session])
+            self._authrole_to_sessions[session_details.authrole] = set([session])
 
         try:
-            self._authid_to_sessions[details['authid']].add(session)
+            self._authid_to_sessions[session_details.authid].add(session)
         except KeyError:
-            self._authid_to_sessions[details['authid']] = set([session])
+            self._authid_to_sessions[session_details.authid] = set([session])
+
+        if self._store:
+            self._store.event_store.store_session_joined(session, session_details)
 
         # log session details, but skip Crossbar.io internal sessions
         if self.realm != u'crossbar':
-            self.log.info(
+            self.log.debug(
                 'session "{session_id}" joined realm "{realm}"',
-                session_id=details[u'session'],
+                session_id=session_details.session,
                 realm=self.realm,
             )
-            self.log.debug('{details}', details=details)
+            self.log.trace('{session_details}', details=session_details)
 
-    def _session_left(self, session, details):
+    def _session_left(self, session, session_details, close_details):
         """
         Internal helper.
         """
-        self._authid_to_sessions[details['authid']].discard(session)
-        if not self._authid_to_sessions[details['authid']]:
-            del self._authid_to_sessions[details['authid']]
-        self._authrole_to_sessions[details['authrole']].discard(session)
+        self._authid_to_sessions[session_details.authid].discard(session)
+        if not self._authid_to_sessions[session_details.authid]:
+            del self._authid_to_sessions[session_details.authid]
+        self._authrole_to_sessions[session_details.authrole].discard(session)
+
+        if self._store:
+            self._store.event_store.store_session_left(session, session_details, close_details)
 
         # log session details, but skip Crossbar.io internal sessions
         if self.realm != u'crossbar':
-            self.log.info(
+            self.log.debug(
                 'session "{session_id}" left realm "{realm}"',
-                session_id=details[u'session'],
+                session_id=session_details.session,
                 realm=self.realm,
             )
-            self.log.debug('{details}', details=details)
+            self.log.trace('{details}', details=session_details)
 
     def detach(self, session=None):
+        self.log.info('{klass}.detach(session={session})',
+                      klass=self.__class__.__name__,
+                      session=session._session_id if session else None)
+
         detached_session_ids = []
         if session is None:
             # detach all sessions from router
@@ -197,6 +251,13 @@ class Router(object):
             # detach single session from router
             self._detach(session)
             detached_session_ids.append(session._session_id)
+
+        self.log.info('{klass}.detach(session={session}): detached sessions {detached_session_ids} from router realm "{realm}"',
+                      klass=self.__class__.__name__,
+                      session=session._session_id if session else None,
+                      detached_session_ids=detached_session_ids,
+                      realm=self.realm)
+
         return detached_session_ids
 
     def _detach(self, session):
@@ -209,12 +270,11 @@ class Router(object):
         if session._session_id in self._session_id_to_session:
             del self._session_id_to_session[session._session_id]
         else:
-            if _is_client_session(session):
-                raise Exception("session with ID {} not attached".format(session._session_id))
+            raise Exception("session with ID {} not attached".format(session._session_id))
 
         self._attached -= 1
         if not self._attached:
-            self._factory.onLastDetach(self)
+            self._factory.on_last_detach(self)
 
         return session._session_id
 
@@ -237,7 +297,13 @@ class Router(object):
             if self._is_traced:
                 self._factory._worker._maybe_trace_tx_msg(session, msg)
         else:
-            self.log.warn('skip sending msg - transport already closed')
+            self.log.debug('skip sending msg - transport already closed')
+
+        # update WAMP message routing statistics
+        msg_type = msg.__class__.__name__.lower()
+        if msg_type not in self._message_stats['sent']:
+            self._message_stats['sent'][msg_type] = 0
+        self._message_stats['sent'][msg_type] += 1
 
     def process(self, session, msg):
         """
@@ -259,6 +325,7 @@ class Router(object):
                 self._broker.processUnsubscribe(session, msg)
 
             elif isinstance(msg, message.EventReceived):
+                # FIXME
                 self._broker.processEventReceived(session, msg)
 
             # Dealer
@@ -288,6 +355,12 @@ class Router(object):
         except:
             self.log.error('INTERNAL ERROR in router incoming message processing')
             self.log.failure()
+
+        # update WAMP message routing statistics
+        msg_type = msg.__class__.__name__.lower()
+        if msg_type not in self._message_stats['received']:
+            self._message_stats['received'][msg_type] = 0
+        self._message_stats['received'][msg_type] += 1
 
     def has_role(self, uri):
         """
@@ -343,7 +416,7 @@ class Router(object):
 
         Implements :func:`autobahn.wamp.interfaces.IRouter.authorize`
         """
-        assert(type(uri) == six.text_type)
+        assert(type(uri) == str)
         assert(action in [u'call', u'register', u'publish', u'subscribe'])
 
         # the role under which the session that wishes to perform the given action on
@@ -358,6 +431,11 @@ class Router(object):
             # normally, the role should exist on the router (and hence we should not arrive
             # here), but the role might have been dynamically removed - and anyway, safety first!
             d = txaio.create_future_success(False)
+
+        # XXX would be nicer for dynamic-authorizer authors if we
+        # sanity-checked the return-value ('authorization') here
+        # (i.e. is it a dict? does it have 'allow' in it? does it have
+        # disallowed keys in it?)
 
         def got_authorization(authorization):
             # backward compatibility
@@ -414,23 +492,23 @@ class RouterFactory(object):
         self._worker = worker
         self._routers = {}
         self._options = options or RouterOptions(uri_check=RouterOptions.URI_CHECK_LOOSE)
-        self._auto_create_realms = False
         # XXX this should get passed in from .. somewhere
         from twisted.internet import reactor
         self._reactor = reactor
+
+    @property
+    def node_id(self):
+        return self._node_id
+
+    @property
+    def worker(self):
+        return self._worker
 
     def get(self, realm):
         """
         Implements :func:`autobahn.wamp.interfaces.IRouterFactory.get`
         """
-        if self._auto_create_realms:
-            if realm not in self._routers:
-                self._routers[realm] = self.router(self, realm, self._options)
-                self.log.debug("Router created for realm '{realm}'",
-                               realm=realm)
-            return self._routers[realm]
-        else:
-            return self._routers[realm]
+        return self._routers.get(realm, None)
 
     def __getitem__(self, realm):
         return self._routers[realm]
@@ -438,11 +516,17 @@ class RouterFactory(object):
     def __contains__(self, realm):
         return realm in self._routers
 
-    def onLastDetach(self, router):
-        assert(router.realm in self._routers)
-        del self._routers[router.realm]
-        self.log.debug("Router destroyed for realm '{realm}'",
-                       realm=router.realm)
+    def on_last_detach(self, router):
+        if router.realm in self._routers:
+            del self._routers[router.realm]
+            self.log.debug('{klass}.on_last_detach: router removed for realm "{realm}"',
+                           klass=self.__class__.__name__,
+                           realm=router.realm)
+        else:
+            self.log.warn('{klass}.on_last_detach: realm "{realm}" not in router realms (skipped removal) - current realms: {realms}',
+                          klass=self.__class__.__name__,
+                          realm=router.realm,
+                          realms=sorted(self._routers.keys()))
 
     def start_realm(self, realm):
         """
@@ -466,19 +550,10 @@ class RouterFactory(object):
         # realm store as appropriate ..
         store = None
         if 'store' in realm.config:
-            store_config = realm.config['store']
-
-            if store_config['type'] == 'lmdb':
-                # if LMDB is available, and a realm store / database is configured,
-                # create an LMDB environment
-                if not HAS_LMDB:
-                    raise Exception("LDMB not available")
-                store = LmdbRealmStore(store_config)
-
-            elif store_config['type'] == 'memory':
-                store = MemoryRealmStore(store_config)
-            else:
-                raise Exception('logic error')
+            psn = self._worker.personality
+            store = psn.create_realm_store(psn, self, realm.config['store'])
+            self.log.info('Initialized realm store {rsk} for realm "{realm}"',
+                          rsk=store.__class__, realm=uri)
 
         # now create a router for the realm
         #
@@ -493,15 +568,18 @@ class RouterFactory(object):
         router = Router(self, realm, options, store=store)
 
         self._routers[uri] = router
-        self.log.debug("Router created for realm '{uri}'", uri=uri)
+        self.log.info('{klass}.start_realm: router created for realm "{uri}"',
+                      klass=self.__class__.__name__,
+                      uri=uri)
 
         return router
 
     def stop_realm(self, realm):
-        self.log.debug('CrossbarRouterFactory.stop_realm(realm="{realm}")',
-                       realm=realm)
+        self.log.info('{klass}.stop_realm(realm="{realm}")',
+                      klass=self.__class__.__name__,
+                      realm=realm)
 
-        assert(type(realm) == six.text_type)
+        assert(type(realm) == str)
 
         if realm not in self._routers:
             raise Exception('no router started for realm "{}"'.format(realm))
@@ -509,13 +587,16 @@ class RouterFactory(object):
         router = self._routers[realm]
         detached_sessions = router.detach()
 
+        if realm in self._routers:
+            del self._routers[realm]
+
         return detached_sessions
 
     def add_role(self, realm, config):
         self.log.debug('CrossbarRouterFactory.add_role(realm="{realm}", config={config})',
                        realm=realm, config=config)
 
-        assert(type(realm) == six.text_type)
+        assert(type(realm) == str)
         assert(realm in self._routers)
 
         router = self._routers[realm]
@@ -543,8 +624,8 @@ class RouterFactory(object):
         self.log.debug('CrossbarRouterFactory.drop_role(realm="{realm}", role={role})',
                        realm=realm, role=role)
 
-        assert(type(realm) == six.text_type)
-        assert(type(role) == six.text_type)
+        assert(type(realm) == str)
+        assert(type(role) == str)
 
         if realm not in self._routers:
             raise Exception('no router started for realm "{}"'.format(realm))
@@ -556,9 +637,3 @@ class RouterFactory(object):
 
         role = router._roles[role]
         router.drop_role(role)
-
-    def auto_start_realm(self, realm):
-        raise Exception("realm auto-activation (realm '{}') not yet implemented".format(realm))
-
-    def auto_add_role(self, realm, role):
-        raise Exception("role auto-activation (role '{}') not yet implemented".format(role))

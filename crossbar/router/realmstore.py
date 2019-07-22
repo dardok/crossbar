@@ -30,24 +30,12 @@
 
 from __future__ import absolute_import, division
 
-import os
-import platform
-
+from zlmdb import time_ns
 from collections import deque
-
-from autobahn.util import utcnow
 
 from txaio import make_logger
 
-try:
-    if platform.python_implementation() == 'PyPy':
-        os.environ['LMDB_FORCE_CFFI'] = '1'
-    import lmdb
-    HAS_LMDB = True
-except ImportError:
-    HAS_LMDB = False
-
-__all__ = ('HAS_LMDB', 'MemoryRealmStore', 'LmdbRealmStore')
+__all__ = ('MemoryRealmStore',)
 
 
 class QueuedCall(object):
@@ -78,19 +66,21 @@ class MemoryCallQueue(object):
 
         See the example here:
 
-            - https://github.com/crossbario/crossbarexamples/tree/master/concurrency-control/queued
+        https://github.com/crossbario/crossbar-examples/tree/master/scaling-microservices/queued
 
-        config = {
-            'type': 'memory',
-            'limit': 1000,           <- global history limit (in case no procedure specific limit has been set)
-            'call-queue': [
-                {
-                    'uri': 'com.example.foobar',   <- procedure specific limit
-                    'match': 'exact',
-                    'limit': 10000
-                }
-            ]
-        }
+        .. code-block:: json
+
+            "store": {
+                "type": "memory",
+                "limit": 1000,      // global default for limit on call queues
+                "call-queue": [
+                    {
+                        "uri": "com.example.compute",
+                        "match": "exact",
+                        "limit": 10000  // procedure specific call queue limit
+                    }
+                ]
+            }
         """
         # whole store configuration
         self._config = config or {}
@@ -126,6 +116,8 @@ class MemoryEventStore(object):
 
     log = make_logger()
 
+    STORE_TYPE = 'memory'
+
     GLOBAL_HISTORY_LIMIT = 100
     """
     The global history limit, in case not overridden.
@@ -136,16 +128,16 @@ class MemoryEventStore(object):
 
         See the example here:
 
-            - https://github.com/crossbario/crossbarexamples/tree/master/event-history
+        https://github.com/crossbario/crossbar-examples/tree/master/event-history
 
-        config = {
-            'type': 'memory',
-            'limit': 1000,           <- global history limit (in case no topic specific limit has been set)
-            'event-history': [
+        "store": {
+            "type": "memory",
+            "limit": 100,       // global default for history limit
+            "event-history": [
                 {
-                    'uri': 'com.example.foobar',   <- topic specific limit
-                    'match': 'prefix',
-                    'limit': 10000
+                    "uri": "com.example.oncounter",
+                    "match": "exact",
+                    "limit": 1000       // topic specific history limit
                 }
             ]
         }
@@ -175,45 +167,64 @@ class MemoryEventStore(object):
             # for in-memory history, we just use a double-ended queue
             self._event_history[subscription_id] = (sub.get('limit', self._limit), deque())
 
-    def store_event(self, publisher_id, publication_id, topic, args=None, kwargs=None):
-        """
-        Persist the given event to history.
+    def store_session_joined(self, session, session_details):
+        self.log.debug('{klass}.store_session_join(session={session}, session_details={session_details})',
+                       klass=self.__class__.__name__, session=session, session_details=session_details)
 
-        :param publisher_id: The session ID of the publisher of the event being persisted.
-        :type publisher_id: int
-        :param publication_id: The publication ID of the event.
-        :type publisher_id: int
-        :param topic: The topic URI of the event.
-        :type topic: unicode
-        :param args: The args payload of the event.
-        :type args: list or None
-        :param kwargs: The kwargs payload of the event.
-        :type kwargs: dict or None
+    def store_session_left(self, session, session_details, close_details):
+        self.log.debug('{klass}.store_session_left(session={session}, session_details={session_details}, close_details={close_details})',
+                       klass=self.__class__.__name__, session=session, session_details=session_details, close_details=close_details)
+
+    def store_event(self, session, publication_id, publish):
+        """
+        Store event to event history.
+
+        :param session: The publishing session.
+        :type session: :class:`autobahn.wamp.interfaces.ISession`
+
+        :param publication_id: The WAMP publication ID under which the publish happens
+        :type publication_id: int
+
+        :param publish: The WAMP publish message.
+        :type publish: :class:`autobahn.wamp.messages.Publish`
         """
         assert(publication_id not in self._event_store)
         evt = {
-            u'timestamp': utcnow(),
-            u'publisher': publisher_id,
-            u'publication': publication_id,
-            u'topic': topic,
-            u'args': args,
-            u'kwargs': kwargs
+            'time_ns': time_ns(),
+            'realm': session._realm,
+            'session_id': session._session_id,
+            'authid': session._authid,
+            'authrole': session._authrole,
+            'publication': publication_id,
+            'topic': publish.topic,
+            'args': publish.args,
+            'kwargs': publish.kwargs
         }
         self._event_store[publication_id] = evt
-        self.log.debug("Event {publication_id} persisted", publication_id=publication_id)
+        self.log.debug("Event {publication_id} stored in {store_type}-store",
+                       store_type=self.STORE_TYPE, publication_id=publication_id)
 
-    def store_event_history(self, publication_id, subscription_id):
+    def store_event_history(self, publication_id, subscription_id, receiver):
         """
-        Persist the given publication history to subscriptions.
+        Store publication history for subscription.
 
         :param publication_id: The ID of the event publication to be persisted.
         :type publication_id: int
+
         :param subscription_id: The ID of the subscription the event (identified by the publication ID),
             was published to, because the event's topic matched the subscription.
         :type subscription_id: int
         """
-        assert(publication_id in self._event_store)
-        assert(subscription_id in self._event_history)
+        # assert(publication_id in self._event_store)
+        # assert(subscription_id in self._event_history)
+
+        if publication_id not in self._event_store:
+            self.log.warn('INTERNAL WARNING: event for publication {publication_id} not in event store', publication_id=publication_id)
+
+        if subscription_id not in self._event_history:
+            self.log.warn('INTERNAL WARNING: subscription {subscription_id} for publication {publication_id} not in event store',
+                          subscription_id=subscription_id, publication_id=publication_id)
+            return
 
         limit, history = self._event_history[subscription_id]
 
@@ -225,7 +236,8 @@ class MemoryEventStore(object):
 
         self._event_subscriptions[publication_id].add(subscription_id)
 
-        self.log.debug("Event {publication_id} history persisted for subscription {subscription_id}", publication_id=publication_id, subscription_id=subscription_id)
+        self.log.debug("Event {publication_id} history stored in {store_type}-store for subscription {subscription_id}",
+                       store_type=self.STORE_TYPE, publication_id=publication_id, subscription_id=subscription_id)
 
         # purge history if over limit
         if len(history) > limit:
@@ -236,7 +248,7 @@ class MemoryEventStore(object):
             # remove the purged publication from event subscriptions
             self._event_subscriptions[purged_publication_id].remove(subscription_id)
 
-            self.log.debug("Event {publication_id} purged fom history for subscription {subscription_id}", publication_id=purged_publication_id, subscription_id=subscription_id)
+            self.log.debug("Event {publication_id} purged from history for subscription {subscription_id}", publication_id=purged_publication_id, subscription_id=subscription_id)
 
             # if no more event subscriptions exist for publication, remove that too
             if not self._event_subscriptions[purged_publication_id]:
@@ -295,6 +307,8 @@ class MemoryRealmStore(object):
     Memory backed realm store.
     """
 
+    log = make_logger()
+
     event_store = None
     """
     Store for event history.
@@ -305,36 +319,11 @@ class MemoryRealmStore(object):
     Store for call queueing.
     """
 
-    def __init__(self, config):
+    def __init__(self, personality, factory, config):
+        """
+
+        :param config: Realm store configuration item.
+        :type config: Mapping
+        """
         self.event_store = MemoryEventStore(config)
         self.call_store = MemoryCallQueue(config)
-
-
-class LmdbEventStore(object):
-    """
-    LMDB backed event store.
-    """
-
-    def __init__(self, env):
-        self._env = env
-        self._event_history = self._env.open_db('event-history')
-
-
-class LmdbRealmStore(object):
-    """
-    LMDB backed realm store.
-    """
-
-    event_store = None
-    """
-    Store for event history.
-    """
-
-    call_store = None
-    """
-    Store for call queueing.
-    """
-
-    def __init__(self, config):
-        self._env = lmdb.open(config['dbfile'], max_dbs=16, writemap=True)
-        self.event_store = LmdbEventStore(self._env)

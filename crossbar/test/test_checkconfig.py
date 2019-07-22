@@ -30,15 +30,15 @@
 
 from __future__ import absolute_import, division, print_function
 
+import json
+from collections.abc import Sequence
+
+import crossbar
 from crossbar.test import TestCase
 from crossbar.common import checkconfig
 
-import json
-import six
-if six.PY3:
-    from collections.abc import Sequence
-else:
-    from collections import Sequence
+
+_DEFAULT_PERSONALITY_CLASS = crossbar.personalities()['standalone']
 
 
 class CheckDictArgsTests(TestCase):
@@ -101,6 +101,10 @@ class CheckContainerTests(TestCase):
     """
     Tests for L{crossbar.common.checkconfig.check_container}.
     """
+    def setUp(self):
+        self.personality = _DEFAULT_PERSONALITY_CLASS
+        return super(TestCase, self).setUp()
+
     def test_validTemplate_hello(self):
         """
         The config provided by the hello:python template should validate
@@ -128,7 +132,7 @@ class CheckContainerTests(TestCase):
                 }
             ]
         }''')
-        checkconfig.check_container(config)
+        self.personality.check_container(self.personality, config)
 
     def test_extraKeys(self):
         """
@@ -158,7 +162,7 @@ class CheckContainerTests(TestCase):
             ]
         }''')
         with self.assertRaises(checkconfig.InvalidConfigException) as e:
-            checkconfig.check_container(config)
+            self.personality.check_container(self.personality, config)
 
         self.assertIn("encountered unknown attribute 'woooooo'",
                       str(e.exception))
@@ -181,7 +185,7 @@ class CheckContainerTests(TestCase):
             ]
         }''')
         with self.assertRaises(checkconfig.InvalidConfigException) as e:
-            checkconfig.check_container(config)
+            self.personality.check_container(self.personality, config)
 
         self.assertIn("invalid component configuration - missing mandatory attribute 'transport'",
                       str(e.exception))
@@ -191,6 +195,9 @@ class CheckEndpointTests(TestCase):
     """
     check_listening_endpoint and check_connecting_endpoint
     """
+    def setUp(self):
+        self.personality = _DEFAULT_PERSONALITY_CLASS
+        return super(TestCase, self).setUp()
 
     def test_twisted_client_error(self):
         config = {
@@ -199,7 +206,7 @@ class CheckEndpointTests(TestCase):
         }
 
         with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
-            checkconfig.check_connecting_endpoint(config)
+            self.personality.check_connecting_endpoint(self.personality, config)
         self.assertTrue(
             "in Twisted endpoint must be str" in str(ctx.exception)
         )
@@ -211,7 +218,7 @@ class CheckEndpointTests(TestCase):
         }
 
         with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
-            checkconfig.check_listening_endpoint(config)
+            self.personality.check_listening_endpoint(self.personality, config)
         self.assertTrue(
             "in Twisted endpoint must be str" in str(ctx.exception)
         )
@@ -222,7 +229,7 @@ class CheckEndpointTests(TestCase):
         }
 
         with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
-            checkconfig.check_listening_endpoint(config)
+            self.personality.check_listening_endpoint(self.personality, config)
         self.assertTrue(
             "mandatory attribute 'server_string'" in str(ctx.exception)
         )
@@ -233,13 +240,17 @@ class CheckEndpointTests(TestCase):
         }
 
         with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
-            checkconfig.check_connecting_endpoint(config)
+            self.personality.check_connecting_endpoint(self.personality, config)
         self.assertTrue(
             "mandatory attribute 'client_string'" in str(ctx.exception)
         )
 
 
 class CheckWebsocketTests(TestCase):
+
+    def setUp(self):
+        self.personality = _DEFAULT_PERSONALITY_CLASS
+        return super(TestCase, self).setUp()
 
     def test_tiny_timeout_auto_ping(self):
         options = dict(auto_ping_timeout=12)
@@ -257,6 +268,10 @@ class CheckRealmTests(TestCase):
     Tests for check_router_realm, check_router_realm_role
     """
 
+    def setUp(self):
+        self.personality = _DEFAULT_PERSONALITY_CLASS
+        return super(TestCase, self).setUp()
+
     def test_dynamic_authorizer(self):
         config_realm = {
             "name": "realm1",
@@ -268,7 +283,7 @@ class CheckRealmTests(TestCase):
             ]
         }
 
-        checkconfig.check_router_realm(config_realm)
+        self.personality.check_router_realm(self.personality, config_realm)
 
     def test_static_permissions(self):
         config_realm = {
@@ -291,7 +306,7 @@ class CheckRealmTests(TestCase):
             ]
         }
 
-        checkconfig.check_router_realm(config_realm)
+        self.personality.check_router_realm(self.personality, config_realm)
 
     def test_static_permissions_invalid_uri(self):
         config_realm = {
@@ -316,7 +331,7 @@ class CheckRealmTests(TestCase):
 
         self.assertRaises(
             checkconfig.InvalidConfigException,
-            checkconfig.check_router_realm, config_realm,
+            self.personality.check_router_realm, self.personality, config_realm,
         )
 
     def test_static_permissions_and_authorizer(self):
@@ -333,7 +348,7 @@ class CheckRealmTests(TestCase):
 
         self.assertRaises(
             checkconfig.InvalidConfigException,
-            checkconfig.check_router_realm, config_realm,
+            self.personality.check_router_realm, self.personality, config_realm,
         )
 
     def test_static_permissions_isnt_list(self):
@@ -349,7 +364,7 @@ class CheckRealmTests(TestCase):
 
         self.assertRaises(
             checkconfig.InvalidConfigException,
-            checkconfig.check_router_realm, config_realm,
+            self.personality.check_router_realm, self.personality, config_realm,
         )
 
     def test_static_permissions_not_dict(self):
@@ -367,7 +382,7 @@ class CheckRealmTests(TestCase):
 
         self.assertRaises(
             checkconfig.InvalidConfigException,
-            checkconfig.check_router_realm, config_realm,
+            self.personality.check_router_realm, self.personality, config_realm,
         )
 
     def test_static_permissions_lacks_uri(self):
@@ -392,7 +407,7 @@ class CheckRealmTests(TestCase):
 
         self.assertRaises(
             checkconfig.InvalidConfigException,
-            checkconfig.check_router_realm, config_realm,
+            self.personality.check_router_realm, self.personality, config_realm,
         )
 
     def test_static_permissions_uri_not_a_string(self):
@@ -412,15 +427,19 @@ class CheckRealmTests(TestCase):
 
         self.assertRaises(
             checkconfig.InvalidConfigException,
-            checkconfig.check_router_realm, config_realm,
+            self.personality.check_router_realm, self.personality, config_realm,
         )
 
 
 class CheckOnion(TestCase):
 
+    def setUp(self):
+        self.personality = _DEFAULT_PERSONALITY_CLASS
+        return super(TestCase, self).setUp()
+
     def test_unknown_attr(self):
         with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
-            checkconfig.check_listening_endpoint_onion({
+            self.personality.check_listening_endpoint_onion(self.personality, {
                 u"type": u"onion",
                 u"foo": 42,
             })
@@ -430,7 +449,7 @@ class CheckOnion(TestCase):
         )
 
     def test_success(self):
-        checkconfig.check_listening_endpoint_onion({
+        self.personality.check_listening_endpoint_onion(self.personality, {
             u"type": u"onion",
             u"private_key_file": u"something",
             u"port": 1234,
@@ -442,7 +461,7 @@ class CheckOnion(TestCase):
 
     def test_port_wrong_type(self):
         with self.assertRaises(checkconfig.InvalidConfigException) as ctx:
-            checkconfig.check_listening_endpoint_onion({
+            self.personality.check_listening_endpoint_onion(self.personality, {
                 u"type": u"onion",
                 u"port": u"1234",
             })

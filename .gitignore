@@ -1,3 +1,5 @@
+.qemu
+.build
 crossbar.spec
 key.pub
 key.priv
@@ -37,6 +39,15 @@ node_modules
 *.ropeproject
 docs/_build
 .coverage.*
-requirements-latest.txt
 vers/
 .DS_Store
+_build
+pip-wheel-metadata
+
+# vscode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.vscode

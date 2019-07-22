@@ -33,8 +33,6 @@ from __future__ import absolute_import
 import os
 import binascii
 
-import six
-
 import nacl
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
@@ -97,7 +95,7 @@ class PendingAuthCryptosign(PendingAuth):
 
     def hello(self, realm, details):
         # the channel binding requested by the client authenticating
-        channel_binding = details.authextra.get(u'channel_binding', None)
+        channel_binding = details.authextra.get(u'channel_binding', None) if details.authextra else None
         if channel_binding is not None and channel_binding not in [u'tls-unique']:
             return types.Deny(message=u'invalid channel binding type "{}" requested'.format(channel_binding))
         else:
@@ -204,7 +202,7 @@ class PendingAuthCryptosign(PendingAuth):
         as a challenge previously, XORed with the 32 bytes transport channel ID (if available).
         """
         try:
-            if type(signed_message) != six.text_type:
+            if not isinstance(signed_message, str):
                 return types.Deny(message=u'invalid type {} for signed message'.format(type(signed_message)))
 
             try:

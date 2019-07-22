@@ -30,6 +30,8 @@
 
 from __future__ import absolute_import
 
+import os
+from zlmdb import time_ns
 import sys
 import socket
 
@@ -151,7 +153,7 @@ if _HAS_PSUTIL:
                 }
             return res
 
-    class ProcessInfo:
+    class ProcessInfo(object):
 
         """
         Access process related information and statistics
@@ -176,8 +178,21 @@ if _HAS_PSUTIL:
                 the given PID, otherwise track the current process.
             :type pid: int
             """
-            self._pid = pid
-            self._p = psutil.Process(pid)
+            self._pid = pid or os.getpid()
+            self._p = psutil.Process(self._pid)
+            if hasattr(self._p, 'cpu_affinity'):
+                self._cpus = sorted(self._p.cpu_affinity())
+            else:
+                # osx lacks CPU process affinity altogether, and
+                # only has thread affinity (since osx 10.5)
+                # => if you can't make it, fake it;)
+                # https://superuser.com/questions/149312/how-to-set-processor-affinity-on-os-x
+                import multiprocessing
+                self._cpus = list(range(multiprocessing.cpu_count()))
+
+        @property
+        def cpus(self):
+            return self._cpus
 
         def get_stats(self):
             """
@@ -185,6 +200,8 @@ if _HAS_PSUTIL:
             """
             res = {}
             res[u'ts'] = utcnow()
+            res[u'time'] = time_ns()
+            res[u'pid'] = self._pid
 
             s = self._p.num_ctx_switches()
 

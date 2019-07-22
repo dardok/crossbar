@@ -30,8 +30,6 @@
 
 from __future__ import absolute_import
 
-import six
-
 from pytrie import StringTrie
 
 from autobahn.wamp.uri import convert_starred_uri, Pattern
@@ -72,15 +70,15 @@ class RouterPermissions(object):
 
         :param uri: The URI to match.
         """
-        assert(uri is None or type(uri) == six.text_type)
+        assert(uri is None or isinstance(uri, str))
         assert(match is None or match in [u'exact', u'prefix', u'wildcard'])
-        assert(type(call) == bool)
-        assert(type(register) == bool)
-        assert(type(publish) == bool)
-        assert(type(subscribe) == bool)
-        assert(type(disclose_caller) == bool)
-        assert(type(disclose_publisher) == bool)
-        assert(type(cache) == bool)
+        assert(isinstance(call, bool))
+        assert(isinstance(register, bool))
+        assert(isinstance(publish, bool))
+        assert(isinstance(subscribe, bool))
+        assert(isinstance(disclose_caller, bool))
+        assert(isinstance(disclose_publisher, bool))
+        assert(isinstance(cache, bool))
 
         self.uri = uri
         self.match = match
@@ -114,7 +112,7 @@ class RouterPermissions(object):
 
     @staticmethod
     def from_dict(obj):
-        assert(type(obj) == dict)
+        assert(isinstance(obj, dict))
 
         uri = obj.get(u'uri', None)
 
@@ -130,14 +128,14 @@ class RouterPermissions(object):
             uri, match = convert_starred_uri(uri)
 
         allow = obj.get(u'allow', {})
-        assert(type(allow) == dict)
+        assert(isinstance(allow, dict))
         allow_call = allow.get(u'call', False)
         allow_register = allow.get(u'register', False)
         allow_publish = allow.get(u'publish', False)
         allow_subscribe = allow.get(u'subscribe', False)
 
         disclose = obj.get(u'disclose', {})
-        assert(type(disclose) == dict)
+        assert(isinstance(disclose, dict))
         disclose_caller = disclose.get(u'caller', False)
         disclose_publisher = disclose.get(u'publisher', False)
 
@@ -223,11 +221,11 @@ class RouterRoleStaticAuth(RouterRole):
         :type default_permissions: dict
         """
         RouterRole.__init__(self, router, uri)
-        assert(permissions is None or type(permissions) == list)
+        assert(permissions is None or isinstance(permissions, list))
         if permissions:
             for p in permissions:
-                assert(type(p) == dict)
-        assert(default_permissions is None or type(default_permissions) == dict)
+                assert(isinstance(p, dict))
+        assert(default_permissions is None or isinstance(default_permissions, dict))
 
         # default permissions (used when nothing else is matching)
         # note: default permissions have their matching URI and match policy set to None!
@@ -387,7 +385,7 @@ class RouterRoleDynamicAuth(RouterRole):
             # this happens for "embedded" sessions -- perhaps we
             # should have a better way to detect this -- also
             # session._transport should be a RouterApplicationSession
-            session_details = {
+            details = {
                 u'session': session._session_id,
                 u'authid': session._authid,
                 u'authrole': session._authrole,
@@ -398,12 +396,22 @@ class RouterRoleDynamicAuth(RouterRole):
                     u'type': u'stdio',  # or maybe "embedded"?
                 }
             }
+        else:
+            details = {
+                u'session': session_details.session,
+                u'authid': session_details.authid,
+                u'authrole': session_details.authrole,
+                u'authmethod': session_details.authmethod,
+                u'authprovider': session_details.authprovider,
+                u'authextra': session_details.authextra,
+                u'transport': session._transport._transport_info
+            }
 
         self.log.debug(
             "CrossbarRouterRoleDynamicAuth.authorize {uri} {action} {details}",
-            uri=uri, action=action, details=session_details)
+            uri=uri, action=action, details=details)
 
-        d = self._session.call(self._authorizer, session_details, uri, action, options)
+        d = self._session.call(self._authorizer, details, uri, action, options)
 
         # we could do backwards-compatibility for clients that didn't
         # yet add the 5th "options" argument to their authorizers like

@@ -46,7 +46,6 @@ log_categories = {
     "AR202": "REST bridge call succeeded.",
     "AR203": "REST bridge signature valid.",
     "AR400": "Malformed request to the REST bridge.",
-    "AR401": "Request denied based on failed authentication.",
     "AR405": "Method not accepted by the REST bridge. ({method} not allowed, only {allowed})",
     "AR413": "Request too long. ({length} is longer than accepted {accepted})",
     "AR450": "Non-accepted request encoding, must be UTF-8.",
@@ -66,6 +65,7 @@ log_categories = {
     "AR464": "Request expired, too old timestamp.",
     "AR465": "Body length ({bodylen}) is different to Content-Length header ({conlen}).",
     "AR466": "Request denied based on IP address.",
+    "AR467": "GitHub signature missing or invalid.",
 
     # MQXXX - Adapter, MQTT Bridge
     "MQ100": "Got packet from '{client_id}': {packet!r}",

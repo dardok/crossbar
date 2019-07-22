@@ -28,7 +28,6 @@
 #
 #####################################################################################
 
-import re
 import os
 
 from setuptools import setup, find_packages
@@ -39,19 +38,14 @@ with open('README.rst') as f:
     long_description = f.read()
 
 # read package version
-with open('crossbar/__init__.py') as f:
-    mo = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", f.read(), re.M)
-    if mo:
-        version = mo.group(1)
-    else:
-        raise RuntimeError('could not read package version')
+with open('crossbar/_version.py') as f:
+    exec(f.read())  # defines __version__
 
 # we read requirements from requirements*.txt files down below
 install_requires = []
 extras_require = {
     'dev': []
 }
-
 
 # minimum, open-ended requirements
 reqs = 'requirements-min.txt'
@@ -69,11 +63,7 @@ with open(reqs) as f:
         if not line.startswith('#'):
             parts = line.strip().split(';')
             if len(parts) > 1:
-                parts[0] = parts[0].strip()
-                parts[1] = ':{}'.format(parts[1].strip())
-                if parts[1] not in extras_require:
-                    extras_require[parts[1]] = []
-                extras_require[parts[1]].append(parts[0])
+                print('Warning: requirements line "{}" ignored, as it uses env markers, which are not supported in setuptools'.format(line))
             else:
                 install_requires.append(parts)
 
@@ -93,8 +83,8 @@ os.environ['PYUBJSON_NO_EXTENSION'] = '1'
 # now actually call into setuptools ..
 setup(
     name='crossbar',
-    version=version,
-    description='Crossbar.io - The Unified Application Router',
+    version=__version__,
+    description='Crossbar.io multi-protocol (WAMP/WebSocket, REST/HTTP, MQTT) application router for microservices.',
     long_description=long_description,
     author='Crossbar.io Technologies GmbH',
     url='http://crossbar.io/',
@@ -105,27 +95,25 @@ setup(
     entry_points={
         # CLI entry function
         'console_scripts': [
-            'crossbar = crossbar.controller.cli:run'
+            'crossbar = crossbar:run'
         ]
     },
     packages=find_packages(),
     include_package_data=True,
-    data_files=[('.', ['COPYRIGHT', 'LICENSE', 'LICENSE-FOR-API'])],
+    data_files=[('.', ['crossbar/LEGAL', 'crossbar/LICENSE', 'crossbar/LICENSE-FOR-API', 'crossbar/LICENSES-OSS'])],
     zip_safe=False,
 
     # http://pypi.python.org/pypi?%3Aaction=list_classifiers
     classifiers=["License :: OSI Approved :: GNU Affero General Public License v3",
-                 "Development Status :: 4 - Beta",
+                 "Development Status :: 5 - Production/Stable",
                  "Environment :: No Input/Output (Daemon)",
                  "Environment :: Console",
                  "Framework :: Twisted",
                  "Intended Audience :: Developers",
                  "Operating System :: OS Independent",
-                 "Programming Language :: Python :: 2.7",
-                 "Programming Language :: Python :: 3.3",
-                 "Programming Language :: Python :: 3.4",
                  "Programming Language :: Python :: 3.5",
                  "Programming Language :: Python :: 3.6",
+                 "Programming Language :: Python :: 3.7",
                  "Programming Language :: Python :: Implementation :: CPython",
                  "Programming Language :: Python :: Implementation :: PyPy",
                  "Topic :: Internet",

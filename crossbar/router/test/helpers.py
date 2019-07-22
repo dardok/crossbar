@@ -29,14 +29,15 @@
 #####################################################################################
 
 from autobahn.twisted.wamp import WampRawSocketClientFactory, ApplicationSessionFactory
+# from autobahn.twisted.wamp import WampWebSocketClientFactory
 from autobahn.wamp.types import ComponentConfig
 
 from crossbar.router.router import RouterFactory
 from crossbar.router.session import RouterSessionFactory
-from crossbar.router.service import RouterServiceSession
-from crossbar.worker.router import RouterRealm
+from crossbar.router.service import RouterServiceAgent
+from crossbar.worker.types import RouterRealm
 from crossbar.router.role import RouterRoleStaticAuth
-from crossbar.router.protocol import WampRawSocketServerFactory
+from crossbar.router.protocol import WampRawSocketServerFactory, WampWebSocketServerFactory
 from crossbar.router.unisocket import UniSocketServerFactory
 
 from twisted.test.iosim import connect, FakeTransport
@@ -52,11 +53,15 @@ def make_router():
     # create a router session factory
     session_factory = RouterSessionFactory(router_factory)
 
+    # Create a new WebSocket factory
+    websocket_server_factory = WampWebSocketServerFactory(session_factory, '.', {}, None)
+
     # Create a new RawSocket factory
     rawsocket_server_factory = WampRawSocketServerFactory(session_factory, {})
 
     # Create a new UniSocket factory
-    server_factory = UniSocketServerFactory(rawsocket_factory=rawsocket_server_factory)
+    server_factory = UniSocketServerFactory(websocket_factory_map={'/': websocket_server_factory},
+                                            rawsocket_factory=rawsocket_server_factory)
 
     return router_factory, server_factory, session_factory
 
@@ -68,12 +73,12 @@ def add_realm_to_router(router_factory, session_factory, realm_name=u'default',
     opts.update({u'name': realm_name})
 
     # start a realm
-    realm = RouterRealm(None, opts)
+    realm = RouterRealm(None, None, opts)
     router = router_factory.start_realm(realm)
 
     extra = {}
     session_config = ComponentConfig(realm_name, extra)
-    realm.session = RouterServiceSession(session_config, router)
+    realm.session = RouterServiceAgent(session_config, router)
 
     # allow everything
     default_permissions = {
@@ -90,7 +95,7 @@ def add_realm_to_router(router_factory, session_factory, realm_name=u'default',
     router = router_factory.get(realm_name)
     router.add_role(RouterRoleStaticAuth(router, 'anonymous', default_permissions=default_permissions))
 
-    session_factory.add(realm.session, authrole=u'trusted')
+    session_factory.add(realm.session, router, authrole=u'trusted')
 
     return router
 
@@ -110,6 +115,7 @@ def connect_application_session(server_factory, MyApplicationSession, component_
     application_session_factory.session = MyApplicationSession
 
     client_factory = WampRawSocketClientFactory(application_session_factory)
+    # client_factory = WampWebSocketClientFactory(application_session_factory)
 
     server_protocol = server_factory.buildProtocol(None)
     client_protocol = client_factory.buildProtocol(None)

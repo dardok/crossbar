@@ -1,0 +1,52 @@
+ [Controller      1] 
+ [Controller      1]     :::::::::::::::::
+ [Controller      1]           :::::          _____                      __
+ [Controller      1]     :::::   :   :::::   / ___/____ ___   ___  ___  / /  ___ _ ____
+ [Controller      1]     :::::::   :::::::  / /__ / __// _ \ (_-< (_-< / _ \/ _ `// __/
+ [Controller      1]     :::::   :   :::::  \___//_/   \___//___//___//_.__/\_,_//_/
+ [Controller      1]           :::::
+ [Controller      1]     :::::::::::::::::   Crossbar v18.7.2
+ [Controller      1] 
+ [Controller      1]     Copyright (c) 2013-2018 Crossbar.io Technologies GmbH, licensed under AGPL 3.0.
+ [Controller      1] 
+ [Controller      1] Initializing <class 'crossbar.personality.Personality'> node from node directory "/node/.crossbar" 
+ [Controller      1] New node key pair generated!
+ [Controller      1] File permissions on node private key fixed
+ [Controller      1] Node key loaded from "/node/.crossbar/key.priv"
+ [Controller      1] Node configuration loaded from "/node/.crossbar/config.json"
+ [Controller      1] Entering event reactor ...
+ [Controller      1] Starting standalone node 
+ [Controller      1] Node ID "983fa84fda45" set from hostname
+ [Controller      1] No extra node router roles
+ [Controller      1] RouterServiceAgent ready (realm_name="crossbar", on_ready=None)
+ [Controller      1] Registered 21 procedures
+ [Controller      1] Signal handler installed on process 1 thread 140562874563464
+ [Controller      1] Using default node shutdown triggers ['shutdown_on_worker_exit']
+ [Controller      1] Booting node 
+ [Controller      1] Configuring node from local configuration 
+ [Controller      1] Starting 1 workers ...
+ [Controller      1] Starting router worker "worker-001" 
+ [Controller      1] Starting new managed worker process for Router worker "worker-001"
+ [Router         13] Starting worker "worker-001" for node "983fa84fda45" with personality "standalone" 
+ [Router         13] Running as PID 13 on CPython-EPollReactor
+ [Router         13] Entering event reactor ...
+ [Router         13] Router worker session for "worker-001" joined realm "crossbar" on node router 
+ [Router         13] Registered 41 procedures
+ [Router         13] Router worker session for "worker-001" ready
+ [Controller      1] Router worker "worker-001" process 13 started
+ [Router         13] Starting router realm "realm-001" 
+ [Router         13] RouterServiceAgent ready (realm_name="realm1", on_ready=<Deferred at 0x7f380ef4a6d8>)
+ [Router         13] Realm "realm-001" (name="realm1") started
+ [Controller      1] Router "worker-001": realm 'realm-001' (named 'realm1') started
+ [Router         13] Starting role "role-001" on realm "realm-001" 
+ [Router         13] role role-001 on realm realm-001 started
+ [Controller      1] Router "worker-001": role 'role-001' (named 'anonymous') started on realm 'realm-001'
+ [Router         13] Starting router transport "transport-001" 
+ [Router         13] Creating router transport for "transport-001" 
+ [Router         13] Router transport created for "transport-001" 
+ [Router         13] UniSocketServerFactory starting on 8080
+ [Controller      1] Router "worker-001": transport 'transport-001' started
+ [Router         13] Starting "nodeinfo" Web service on path "info" of transport "transport-001" 
+ [Controller      1] Router "worker-001": web service 'nodeinfo' started on path 'info' on transport 'transport-001'
+ [Controller      1] Local node configuration applied successfully!
+

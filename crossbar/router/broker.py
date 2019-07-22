@@ -37,6 +37,7 @@ import txaio
 from autobahn import util
 from autobahn.wamp import role, message, types
 from autobahn.wamp.exception import ApplicationError
+from autobahn.exception import PayloadExceededError
 
 from autobahn.wamp.message import \
     _URI_PAT_STRICT_NON_EMPTY, _URI_PAT_LOOSE_NON_EMPTY, \
@@ -44,7 +45,7 @@ from autobahn.wamp.message import \
     _URI_PAT_STRICT_LAST_EMPTY, _URI_PAT_LOOSE_LAST_EMPTY
 
 from crossbar.router.observation import UriObservationMap
-from crossbar.router import RouterOptions
+from crossbar.router import RouterOptions, NotAttached
 
 from txaio import make_logger
 
@@ -89,7 +90,7 @@ class Broker(object):
     def __init__(self, router, reactor, options=None):
         """
 
-        :param router: The router this dealer is part of.
+        :param router: The router this broker is part of.
         :type router: Object that implements :class:`crossbar.router.interfaces.IRouter`.
 
         :param options: Router options.
@@ -167,13 +168,16 @@ class Broker(object):
                    self._router._realm.session and \
                    not subscription.uri.startswith(u'wamp.'):
 
-                    def _publish():
+                    def _publish(subscription):
                         service_session = self._router._realm.session
+
+                        # FIXME: what about exclude_authid as colleced from forward_for? like we do elsewhere in this file!
                         options = types.PublishOptions(
                             correlation_id=None,
                             correlation_is_anchor=True,
                             correlation_is_last=False
                         )
+
                         if was_subscribed:
                             service_session.publish(
                                 u'wamp.subscription.on_unsubscribe',
@@ -181,6 +185,7 @@ class Broker(object):
                                 subscription.id,
                                 options=options,
                             )
+
                         if was_deleted:
                             options.correlation_is_last = True
                             service_session.publish(
@@ -190,12 +195,12 @@ class Broker(object):
                                 options=options,
                             )
                     # we postpone actual sending of meta events until we return to this client session
-                    self._reactor.callLater(0, _publish)
+                    self._reactor.callLater(0, _publish, subscription)
 
             del self._session_to_subscriptions[session]
 
         else:
-            raise Exception("session with ID {} not attached".format(session._session_id))
+            raise NotAttached("session with ID {} not attached".format(session._session_id))
 
     def _filter_publish_receivers(self, receivers, publish):
         """
@@ -421,16 +426,28 @@ class Broker(object):
                     #
                     if authorization[u'disclose']:
                         disclose = True
-                    elif (publish.topic.startswith(u"wamp.") or
-                          publish.topic.startswith(u"crossbar.")):
+                    elif (publish.topic.startswith(u"wamp.") or publish.topic.startswith(u"crossbar.")):
                         disclose = True
                     else:
                         disclose = False
 
+                    forward_for = None
                     if disclose:
-                        publisher = session._session_id
-                        publisher_authid = session._authid
-                        publisher_authrole = session._authrole
+                        if publish.forward_for:
+                            publisher = publish.forward_for[0]['session']
+                            publisher_authid = publish.forward_for[0]['authid']
+                            publisher_authrole = publish.forward_for[0]['authrole']
+                            forward_for = publish.forward_for + [
+                                {
+                                    'session': session._session_id,
+                                    'authid': session._authid,
+                                    'authrole': session._authrole,
+                                }
+                            ]
+                        else:
+                            publisher = session._session_id
+                            publisher_authid = session._authid
+                            publisher_authrole = session._authrole
                     else:
                         publisher = None
                         publisher_authid = None
@@ -447,7 +464,7 @@ class Broker(object):
                     # the event matches on)
                     #
                     if store_event:
-                        self._event_store.store_event(session._session_id, publication, publish.topic, publish.args, publish.kwargs)
+                        self._event_store.store_event(session, publication, publish)
 
                     # retain event on the topic
                     #
@@ -487,11 +504,6 @@ class Broker(object):
                     # there is any actual receiver right now on the subscription)
                     #
                     for subscription in subscriptions:
-
-                        # persist event history, but check if it is persisted on the individual subscription!
-                        #
-                        if store_event and self._event_store in subscription.observers:
-                            self._event_store.store_event_history(publication, subscription.id)
 
                         # initial list of receivers are all subscribers on a subscription ..
                         #
@@ -540,7 +552,10 @@ class Broker(object):
 
                         for subscription, receivers in subscription_to_receivers.items():
 
-                            self.log.debug('dispatching for subscription={subscription}', subscription=subscription)
+                            storing_event = store_event and self._event_store in subscription.observers
+
+                            self.log.debug('dispatching for subscription={subscription}, storing_event={storing_event}',
+                                           subscription=subscription, storing_event=storing_event)
 
                             # for pattern-based subscriptions, the EVENT must contain
                             # the actual topic being published to
@@ -560,7 +575,8 @@ class Broker(object):
                                                     topic=topic,
                                                     enc_algo=publish.enc_algo,
                                                     enc_key=publish.enc_key,
-                                                    enc_serializer=publish.enc_serializer)
+                                                    enc_serializer=publish.enc_serializer,
+                                                    forward_for=forward_for)
                             else:
                                 msg = message.Event(subscription.id,
                                                     publication,
@@ -569,7 +585,8 @@ class Broker(object):
                                                     publisher=publisher,
                                                     publisher_authid=publisher_authid,
                                                     publisher_authrole=publisher_authrole,
-                                                    topic=topic)
+                                                    topic=topic,
+                                                    forward_for=forward_for)
 
                             # if the publish message had a correlation ID, this will also be the
                             # correlation ID of the event message sent out
@@ -628,16 +645,49 @@ class Broker(object):
                                 # we now actually do the deliveries, but now we know which
                                 # receiver is the last one
                                 if receivers or not self._router.is_traced:
+
                                     # NOT the last chunk (or we're not traced so don't care)
                                     for receiver in receivers_this_chunk:
-                                        self._router.send(receiver, msg)
+
+                                        # send out WAMP msg to peer
+                                        try:
+                                            self._router.send(receiver, msg)
+                                        except PayloadExceededError as e:
+                                            self.log.warn('could not dispatch event to receiver {receiver} (subscription_id={subscription_id}, publication_id={publication_id}): {err}',
+                                                          receiver=receiver._session_id,
+                                                          subscription_id=subscription.id,
+                                                          publication_id=publication,
+                                                          err=str(e))
+                                        if self._event_store or storing_event:
+                                            self._event_store.store_event_history(publication, subscription.id, receiver)
                                 else:
                                     # last chunk, so last receiver gets the different message
                                     for receiver in receivers_this_chunk[:-1]:
-                                        self._router.send(receiver, msg)
-                                    # we might have zero valid receivers
+                                        try:
+                                            self._router.send(receiver, msg)
+                                        except PayloadExceededError as e:
+                                            self.log.warn('could not dispatch event to receiver {receiver} (subscription_id={subscription_id}, publication_id={publication_id}): {err}',
+                                                          receiver=receiver._session_id,
+                                                          subscription_id=subscription.id,
+                                                          publication_id=publication,
+                                                          err=str(e))
+                                        if self._event_store or storing_event:
+                                            self._event_store.store_event_history(publication, subscription.id, receiver)
+
+                                    # send last receiver a different message (and guard: we might have zero valid receivers in the last chunk!)
                                     if receivers_this_chunk:
-                                        self._router.send(receivers_this_chunk[-1], last_msg)
+                                        receiver = receivers_this_chunk[-1]
+                                        try:
+                                            self._router.send(receiver, last_msg)
+                                        except PayloadExceededError as e:
+                                            self.log.warn('could not dispatch event to receiver {receiver} (subscription_id={subscription_id}, publication_id={publication_id}): {err}',
+                                                          receiver=receiver._session_id,
+                                                          subscription_id=subscription.id,
+                                                          publication_id=publication,
+                                                          err=str(e))
+                                        if self._event_store or storing_event:
+                                            self._event_store.store_event_history(publication, subscription.id,
+                                                                                  receiver)
 
                                 if receivers:
                                     # still more to do ..
@@ -758,13 +808,23 @@ class Broker(object):
 
                     has_follow_up_messages = True
 
+                    exclude_authid = None
+                    if subscribe.forward_for:
+                        exclude_authid = [ff['authid'] for ff in subscribe.forward_for]
+
                     def _publish():
                         service_session = self._router._realm.session
-                        options = types.PublishOptions(
-                            correlation_id=subscribe.correlation_id,
-                            correlation_is_anchor=False,
-                            correlation_is_last=False,
-                        )
+
+                        if exclude_authid or self._router.is_traced:
+                            options = types.PublishOptions(
+                                correlation_id=subscribe.correlation_id,
+                                correlation_is_anchor=False,
+                                correlation_is_last=False,
+                                exclude_authid=exclude_authid,
+                            )
+                        else:
+                            options = None
+
                         if is_first_subscriber:
                             subscription_details = {
                                 u'id': subscription.id,
@@ -778,8 +838,11 @@ class Broker(object):
                                 subscription_details,
                                 options=options,
                             )
+
                         if not was_already_subscribed:
-                            options.correlation_is_last = True
+                            if options:
+                                options.correlation_is_last = True
+
                             service_session.publish(
                                 u'wamp.subscription.on_subscribe',
                                 session._session_id,
@@ -956,14 +1019,19 @@ class Broker(object):
 
             has_follow_up_messages = True
 
+            exclude_authid = None
+            if unsubscribe and unsubscribe.forward_for:
+                exclude_authid = [ff['authid'] for ff in unsubscribe.forward_for]
+
             def _publish():
                 service_session = self._router._realm.session
 
-                if unsubscribe and self._router.is_traced:
+                if unsubscribe and (exclude_authid or self._router.is_traced):
                     options = types.PublishOptions(
                         correlation_id=unsubscribe.correlation_id,
                         correlation_is_anchor=False,
-                        correlation_is_last=False
+                        correlation_is_last=False,
+                        exclude_authid=exclude_authid,
                     )
                 else:
                     options = None

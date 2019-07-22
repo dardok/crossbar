@@ -1,0 +1,41 @@
+/* custom CSS to include in generated pages */
+
+.wy-nav-content {
+    max-width: 1200px;
+}
+
+.wy-nav-side {
+    position: fixed;
+}
+
+.wy-side-nav-search {
+    background-color: #333333;
+}
+
+.wy-side-nav-search>a img.logo {
+    width: 160px;
+}
+
+.rdftriple {
+    width: 100%;
+    max-width: 600px;
+}
+
+.rst-content .note .admonition-title {
+    background-color: #333333;
+    color: #FFF000;
+}
+
+.rst-content table.docutils thead {
+    background-color: #333333;
+    color: #FFF000;
+}
+
+.rst-content .note {
+    background-color: #E3E3E3;
+}
+
+.rst-content div[class^='highlight'] {
+
+    background-color: #E3E3E3;
+}

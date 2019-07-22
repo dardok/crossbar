@@ -1,9 +1,6 @@
 name: crossbar
-# Fallback version
-version: '17.9.2'
-version-script: |
-    grep -E '^(__version__)' crossbar/__init__.py | \
-    cut -d ' ' -f3 | sed -e 's|["'\'']||g'
+version: latest
+version-script: git describe --always | sed -e 's/-/+git/;y/-/./' | tail -c +2
 summary: Crossbar.io - Polyglot application router.
 description: |
   Crossbar.io is a networking platform for distributed and microservice
@@ -13,10 +10,21 @@ description: |
 
 grade: stable
 confinement: strict
+base: core18
+
+architectures:
+  - build-on: amd64
+    run-on: amd64
+
+  - build-on: i386
+    run-on: i386
+
+  - build-on: armhf
+    run-on: armhf
 
 apps:
   crossbar:
-    command: bin/crossbar
+    command: crossbar
     plugs:
       - home
       - network
@@ -25,11 +33,20 @@ apps:
 parts:
   crossbar:
     plugin: python
-    source: https://github.com/crossbario/crossbar.git
-    python-packages:
-      - cffi>=1.1.0
+    source: .
+    stage-packages:
+      - libsnappy1v5
     build-packages:
       - gcc
       - libffi-dev
       - libssl-dev
       - make
+      - libbz2-dev
+      - libsnappy-dev
+      - libunwind-dev
+    override-prime: |
+      snapcraftctl prime
+      echo "Compiling pyc files..."
+      # Delete the file that would fail the compilation process
+      rm $SNAPCRAFT_PRIME/lib/python3.6/site-packages/crossbar/worker/test/examples/syntaxerror.py
+      $SNAPCRAFT_PART_INSTALL/usr/bin/python3 -m compileall -q $SNAPCRAFT_PRIME
